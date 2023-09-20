@@ -7,6 +7,7 @@
 #include "dynamatic/Conversion/HandshakeToNetlist.h"
 #include "circt/Conversion/HandshakeToHW.h"
 #include "circt/Dialect/ESI/ESIOps.h"
+#include "circt/Dialect/ESI/ESITypes.h"
 #include "circt/Dialect/HW/HWOpInterfaces.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWTypes.h"
@@ -18,9 +19,12 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/ValueRange.h"
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include <iterator>
 
 using namespace mlir;
 using namespace circt;
@@ -42,19 +46,9 @@ using NameUniquer = std::function<std::string(Operation *)>;
 /// of arguments we have to pass around.
 struct HandshakeLoweringState {
   /// Module containing the handshake-level function to lower.
-  ModuleOp parentModule;
+  ModuleOp mod;
   /// Producer of unique names for external modules.
   NameUniquer nameUniquer;
-  /// Builder for (external) modules.
-  OpBuilder extModBuilder;
-
-  /// Creates the lowering state, producing an OpBuilder from the parent
-  /// module's context and setting its insertion point in the module's body.
-  HandshakeLoweringState(ModuleOp mod, NameUniquer nameUniquer)
-      : parentModule(mod), nameUniquer(nameUniquer),
-        extModBuilder(mod->getContext()) {
-    extModBuilder.setInsertionPointToStart(mod.getBody());
-  }
 };
 
 /// Holds information about a function's ports. This is used primarily to keep
@@ -85,7 +79,7 @@ struct FuncModulePortInfo {
   /// to the function. The name argument is used to prefix the name of all ports
   /// associated with the memory interface; it must therefore be unique across
   /// calls to the method.
-  void addMemIO(MemRefType memref, std::string name, MLIRContext *ctx);
+  void addMemIO(MemRefType memref, const std::string &name, MLIRContext *ctx);
 
   /// Computes the number of output ports that are associated with internal
   /// memory interfaces.
@@ -94,7 +88,7 @@ struct FuncModulePortInfo {
 
 } // namespace
 
-void FuncModulePortInfo::addMemIO(MemRefType memref, std::string name,
+void FuncModulePortInfo::addMemIO(MemRefType memref, const std::string &name,
                                   MLIRContext *ctx) {
   // Types used by memory IO
   Type i1Type = IntegerType::get(ctx, 1);
@@ -104,7 +98,7 @@ void FuncModulePortInfo::addMemIO(MemRefType memref, std::string name,
   // Remember ports which correspond to memory
   auto inputIdx = ports.inputs.size();
   auto outputIdx = ports.outputs.size();
-  memIO.push_back(std::make_pair(inputIdx, outputIdx));
+  memIO.emplace_back(inputIdx, outputIdx);
 
   // Load data input
   ports.inputs.push_back({StringAttr::get(ctx, name + "_load_data"),
@@ -183,20 +177,12 @@ static std::string getTypeName(Type type, Location loc) {
   if (isa<FloatType>(type))
     return std::to_string(type.getIntOrFloatBitWidth());
 
-  // Tuple type
-  if (auto tupleType = type.dyn_cast<TupleType>()) {
-    std::string tupleName = "_tuple";
-    for (auto elementType : tupleType.getTypes())
-      tupleName += getTypeName(elementType, loc);
-    return tupleName;
-  }
-
   // NoneType (dataless channel)
   if (isa<NoneType>(type))
     return "0";
 
   emitError(loc) << "data type \"" << type << "\" not supported";
-  return "";
+  llvm_unreachable("cannot create type name");
 }
 
 /// Constructs an external module name corresponding to an operation. The
@@ -382,20 +368,16 @@ static hw::HWModuleLike findModule(mlir::ModuleOp parentModule,
 /// functions first attempts to find an existing module with the same name,
 /// which it returns if it exists. Failing the latter, the function creates an
 /// external module at the provided location and with the provided ports.
-static hw::HWModuleLike getModule(HandshakeLoweringState &ls,
-                                  std::string modName, ModulePortInfo &ports,
-                                  Location modLoc) {
-  hw::HWModuleLike mod = findModule(ls.parentModule, modName);
-  if (!mod)
-    return ls.extModBuilder.create<hw::HWModuleExternOp>(
-        modLoc, ls.extModBuilder.getStringAttr(modName), ports);
+static hw::HWModuleLike getModule(mlir::ModuleOp parentMod,
+                                  std::string &modName, ModulePortInfo &ports,
+                                  Location modLoc,
+                                  ConversionPatternRewriter &rewriter) {
+  hw::HWModuleLike mod = findModule(parentMod, modName);
+  if (!mod) {
+    return rewriter.create<hw::HWModuleExternOp>(
+        modLoc, rewriter.getStringAttr(modName), ports);
+  }
   return mod;
-}
-
-/// Derives port information for an operation so that it can be converted to a
-/// hardware module.
-static ModulePortInfo getPortInfo(Operation *op) {
-  return getPortInfoForOpTypes(op, op->getOperandTypes(), op->getResultTypes());
 }
 
 /// Name of port representing the clock signal.
@@ -586,45 +568,47 @@ public:
       : OpConversionPattern<handshake::FuncOp>(ctx, 1), ls(ls) {}
 
   LogicalResult
-  matchAndRewrite(handshake::FuncOp op, OpAdaptor operands,
+  matchAndRewrite(handshake::FuncOp funcOp, OpAdaptor operands,
                   ConversionPatternRewriter &rewriter) const override {
+    FuncModulePortInfo info = getFuncPortInfo(funcOp);
+    rewriter.setInsertionPoint(funcOp);
 
-    FuncModulePortInfo info = getFuncPortInfo(op);
-
-    if (op.isExternal())
-      ls.extModBuilder.create<hw::HWModuleExternOp>(
-          op.getLoc(), ls.extModBuilder.getStringAttr(op.getName()),
-          info.ports);
-    else {
-      // Create module for the function
-      auto mod = ls.extModBuilder.create<hw::HWModuleOp>(
-          op.getLoc(), ls.extModBuilder.getStringAttr(op.getName()),
-          info.ports);
-
-      // Replace uses of function arguments with module inputs
-      for (auto it : llvm::zip(op.getArguments(), mod.getArguments()))
-        std::get<0>(it).replaceAllUsesWith(std::get<1>(it));
-
-      // Move all operations to the new module
-      auto &moduleBlockOps = mod.getBodyBlock()->getOperations();
-      moduleBlockOps.splice(moduleBlockOps.begin(),
-                            op.getBody().front().getOperations());
-
-      // Insert a start buffer for each channel-typed input
-      bufferInputs(mod, rewriter);
-
-      // Convert memory interfaces (and connect them with function IO)
-      auto memInstances = convertMemories(mod, info, rewriter);
-
-      // Convert end operation (add results to represent function return values)
-      auto endInstance = convertEnd(mod, info, rewriter);
-
-      // Set operands of output operation to match module outputs
-      setModuleOutputs(mod, memInstances, endInstance);
+    if (funcOp.isExternal()) {
+      rewriter.replaceOpWithNewOp<hw::HWModuleExternOp>(
+          funcOp, rewriter.getStringAttr(funcOp.getName()), info.ports);
+      return success();
     }
 
-    // Original function can safely be deleted before returning
-    rewriter.eraseOp(op);
+    // Create module for the function
+    hw::HWModuleOp modOp = rewriter.create<hw::HWModuleOp>(
+        funcOp->getLoc(), rewriter.getStringAttr(funcOp.getName()), info.ports);
+
+    // This is for some reason necessary before moving operations to the new
+    // module but it shouldn't be given that inlineBlockBefore supposedly does
+    // exactly the same thing
+    rewriter.replaceAllUsesWith(funcOp.getArguments(),
+                                modOp.getArguments().drop_back(2));
+    // Move all operations to the new module
+    rewriter.inlineBlockBefore(&funcOp.getBody().front(),
+                               modOp.getBodyBlock()->getTerminator(),
+                               modOp.getArguments().drop_back(2));
+
+    // Insert a start buffer for each channel-typed input
+    bufferInputs(modOp, rewriter);
+
+    // Convert memory interfaces (and connect them with function IO)
+    SmallVector<hw::InstanceOp> memInstances =
+        convertMemories(modOp, info, rewriter);
+
+    // Convert end operation (add results for function return values)
+    hw::InstanceOp endInstance =
+        convertEnd(modOp, info, memInstances, rewriter);
+
+    // Set operands of output operation to match module outputs
+    setModuleOutputs(modOp, memInstances, endInstance, rewriter);
+    rewriter.eraseOp(funcOp);
+
+    ls.mod->emitRemark();
     return success();
   }
 
@@ -648,13 +632,15 @@ private:
   /// hardware instance with added outputs to hold the function return values.
   /// The function returns the created hardware instance.
   hw::InstanceOp convertEnd(HWModuleOp mod, FuncModulePortInfo &info,
+                            SmallVector<hw::InstanceOp> &memInstances,
                             ConversionPatternRewriter &rewriter) const;
 
   /// Modifies the operands of the hw::OutputOp operation within the newly
   /// created module to match the latter's outputs.
   void setModuleOutputs(HWModuleOp mod,
-                        SmallVector<hw::InstanceOp> memInstances,
-                        hw::InstanceOp endInstance) const;
+                        SmallVector<hw::InstanceOp> &memInstances,
+                        hw::InstanceOp endInstance,
+                        ConversionPatternRewriter &rewriter) const;
 };
 
 /// Converts an operation (of type indicated by the template argument) into an
@@ -669,29 +655,35 @@ public:
   ExtModuleConversionPattern(ESITypeConverter &typeConverter, MLIRContext *ctx,
                              HandshakeLoweringState &ls)
       : OpConversionPattern<T>::OpConversionPattern(typeConverter, ctx),
-        ls(ls) {}
+        ls(ls) {
+    this->setHasBoundedRewriteRecursion();
+  }
+
   using OpAdaptor = typename T::Adaptor;
 
   LogicalResult
   matchAndRewrite(T op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-
     auto modName = getExtModuleName(op);
-    auto ports = getPortInfo(op);
-    hw::HWModuleLike extModule = getModule(ls, modName, ports, op.getLoc());
+    auto ports =
+        getPortInfoForOpTypes(op, op->getOperandTypes(), op->getResultTypes());
+
+    rewriter.setInsertionPointToEnd(ls.mod->getBlock());
+    hw::HWModuleLike extModule =
+        getModule(ls.mod, modName, ports, op.getLoc(), rewriter);
 
     // Replace operation with corresponding hardware module instance
     SmallVector<Value> operands = adaptor.getOperands();
     if (op.template hasTrait<mlir::OpTrait::HasClock>())
       addClkAndRstOperands(operands, cast<hw::HWModuleOp>(op->getParentOp()));
 
+    rewriter.setInsertionPoint(op);
     auto instanceOp = rewriter.replaceOpWithNewOp<hw::InstanceOp>(
         op, extModule, rewriter.getStringAttr(ls.nameUniquer(op)), operands);
 
     // Replace operation results with new instance results
-    for (auto it : llvm::zip(op->getResults(), instanceOp->getResults()))
-      std::get<0>(it).replaceAllUsesWith(std::get<1>(it));
-
+    rewriter.replaceAllUsesWith(op->getResults(), instanceOp->getResults());
+    ls.mod->emitRemark();
     return success();
   }
 
@@ -733,12 +725,15 @@ void FuncOpConversionPattern::bufferInputs(
     if (auto channelType = argType.dyn_cast<esi::ChannelType>())
       modName += "." + getTypeName(channelType.getInner(), argLoc);
 
-    hw::HWModuleLike extModule = getModule(ls, modName, ports, argLoc);
+    rewriter.setInsertionPointToEnd(mod->getBlock());
+    hw::HWModuleLike extModule =
+        getModule(ls.mod, modName, ports, argLoc, rewriter);
 
     // Replace operation with corresponding hardware module instance
     llvm::SmallVector<Value> operands;
     operands.push_back(arg);
     addClkAndRstOperands(operands, mod);
+    rewriter.setInsertionPointToStart(mod.getBodyBlock());
     auto instanceOp = rewriter.create<hw::InstanceOp>(
         argLoc, extModule,
         rewriter.getStringAttr("handshake_start_node" +
@@ -757,42 +752,38 @@ SmallVector<hw::InstanceOp> FuncOpConversionPattern::convertMemories(
 
   for (auto [memIdx, portIndices] : llvm::enumerate(info.memIO)) {
     // Identify the memory controller refering to the memref
-    auto user = *mod.getArgument(portIndices.first).getUsers().begin();
+    Operation *user = *mod.getArgument(portIndices.first).getUsers().begin();
     assert(user && "old memref value should have a user");
     auto memOp = dyn_cast<handshake::MemoryControllerOp>(user);
     assert(memOp && "user of old memref value should be memory interface");
 
     std::string memName = getExtModuleName(memOp);
-    auto ports = getMemPortInfo(memOp, info, memIdx);
+    ModulePortInfo ports = getMemPortInfo(memOp, info, memIdx);
 
     // Create an external module definition if necessary
-    hw::HWModuleLike extModule = getModule(ls, memName, ports, memOp->getLoc());
+    rewriter.setInsertionPointToEnd(ls.mod->getBlock());
+    hw::HWModuleLike extModule =
+        getModule(ls.mod, memName, ports, memOp->getLoc(), rewriter);
 
-    // Combine memory inputs from the function and internal memory inputs into
-    // the new instance operands
+    // Combine memory inputs from the function's ports and from internal memory
+    // ports to get the new instance operands
     SmallVector<Value> operands;
-    for (auto i = portIndices.first,
-              e = portIndices.first + FuncModulePortInfo::NUM_MEM_INPUTS;
-         i < e; i++)
-      operands.push_back(mod.getArgument(i));
-    operands.insert(operands.end(), memOp.getInputs().begin(),
-                    memOp.getInputs().end());
+    llvm::copy(mod.getArguments().slice(portIndices.first,
+                                        FuncModulePortInfo::NUM_MEM_INPUTS),
+               std::back_inserter(operands));
+    llvm::copy(memOp.getInputs(), std::back_inserter(operands));
     addClkAndRstOperands(operands, mod);
 
     // Create instance of memory interface
     rewriter.setInsertionPoint(memOp);
-    auto instance = rewriter.create<hw::InstanceOp>(
-        memOp.getLoc(), extModule,
-        rewriter.getStringAttr(ls.nameUniquer(memOp)), operands);
-
-    // Replace uses of memory interface results with new instance results
-    for (auto it :
-         llvm::zip(memOp->getResults(),
-                   instance->getResults().take_front(memOp->getNumResults())))
-      std::get<0>(it).replaceAllUsesWith(std::get<1>(it));
-
-    rewriter.eraseOp(memOp);
+    mlir::StringAttr instName = rewriter.getStringAttr(ls.nameUniquer(memOp));
+    hw::InstanceOp instance = rewriter.create<hw::InstanceOp>(
+        memOp.getLoc(), extModule, instName, operands);
     instances.push_back(instance);
+
+    // Replace the memory controller with the instance
+    rewriter.replaceOp(
+        memOp, instance->getResults().take_front(memOp->getNumResults()));
   }
 
   return instances;
@@ -800,17 +791,34 @@ SmallVector<hw::InstanceOp> FuncOpConversionPattern::convertMemories(
 
 hw::InstanceOp
 FuncOpConversionPattern::convertEnd(HWModuleOp mod, FuncModulePortInfo &info,
+                                    SmallVector<hw::InstanceOp> &memInstances,
                                     ConversionPatternRewriter &rewriter) const {
   // End operation is guaranteed to exist and be unique
   auto endOp = *mod.getBodyBlock()->getOps<handshake::EndOp>().begin();
 
   // Create external module
-  auto extModule = ls.extModBuilder.create<hw::HWModuleExternOp>(
-      endOp->getLoc(), ls.extModBuilder.getStringAttr(getExtModuleName(endOp)),
+  rewriter.setInsertionPointToEnd(ls.mod->getBlock());
+  auto extModule = rewriter.create<hw::HWModuleExternOp>(
+      endOp->getLoc(), rewriter.getStringAttr(getExtModuleName(endOp)),
       getEndPortInfo(endOp, info));
 
   // Create instance of end operation
-  SmallVector<Value> operands(endOp.getOperands());
+  SmallVector<Value> operands;
+  size_t numRetVals = endOp.getNumOperands() - memInstances.size();
+  for (Value retVal : endOp->getOperands().take_front(numRetVals)) {
+    rewriter.setInsertionPointAfterValue(retVal);
+    operands.push_back(
+        rewriter
+            .create<mlir::UnrealizedConversionCastOp>(
+                retVal.getLoc(), esiWrapper(retVal.getType()), retVal)
+            .getResult(0));
+  }
+  for (hw::InstanceOp instOp : memInstances) {
+    size_t ctrlIdx =
+        instOp->getNumResults() - 1 - FuncModulePortInfo::NUM_MEM_OUTPUTS;
+    operands.push_back(instOp.getResult(ctrlIdx));
+  }
+
   addClkAndRstOperands(operands, mod);
   rewriter.setInsertionPoint(endOp);
   auto instance = rewriter.create<hw::InstanceOp>(
@@ -822,23 +830,22 @@ FuncOpConversionPattern::convertEnd(HWModuleOp mod, FuncModulePortInfo &info,
 }
 
 void FuncOpConversionPattern::setModuleOutputs(
-    HWModuleOp mod, SmallVector<hw::InstanceOp> memInstances,
-    hw::InstanceOp endInstance) const {
-  // Output operation is guaranteed to exist and be unique
-  auto outputOp = *mod.getBodyBlock()->getOps<hw::OutputOp>().begin();
+    HWModuleOp mod, SmallVector<hw::InstanceOp> &memInstances,
+    hw::InstanceOp endInstance, ConversionPatternRewriter &rewriter) const {
+  // Output operation is guaranteed to exist and is unique
+  hw::OutputOp outputOp = *mod.getBodyBlock()->getOps<hw::OutputOp>().begin();
 
-  // Derive new operands
+  // Module outputs are the original function's return values and the outputs
+  // from all memory interfaces
   SmallVector<Value> newOperands;
-  newOperands.insert(newOperands.end(), endInstance.getResults().begin(),
-                     endInstance.getResults().end());
-  for (auto &mem : memInstances) {
-    auto memOutputs =
-        mem.getResults().take_back(FuncModulePortInfo::NUM_MEM_OUTPUTS);
-    newOperands.insert(newOperands.end(), memOutputs.begin(), memOutputs.end());
-  }
+  llvm::copy(endInstance.getResults(), std::back_inserter(newOperands));
+  for (hw::InstanceOp mem : memInstances)
+    llvm::copy(mem.getResults().take_back(FuncModulePortInfo::NUM_MEM_OUTPUTS),
+               std::back_inserter(newOperands));
 
   // Switch operands
-  outputOp->setOperands(newOperands);
+  rewriter.updateRootInPlace(outputOp,
+                             [&] { outputOp->setOperands(newOperands); });
 }
 
 /// Verifies that all the operations inside the function, which may be more
@@ -966,7 +973,7 @@ public:
       std::string instName = getBareExtModuleName(op);
       return instName + std::to_string(instanceNameCntr[instName]++);
     };
-    HandshakeLoweringState ls(mod, instanceUniquer);
+    HandshakeLoweringState ls{mod, instanceUniquer};
 
     // Create pattern set
     ESITypeConverter typeConverter;
@@ -1041,8 +1048,7 @@ public:
 private:
   /// Perfoms some simple transformations on the module to make the netlist that
   /// will result from the conversion able to be turned into an RTL design.
-  /// NOTE: (RamirezLucas) Ideally, this should be moved to a separate
-  /// pre-processing pass.
+  /// NOTE: Ideally, this should be moved to a separate pre-processing pass.
   LogicalResult preprocessMod();
 };
 
