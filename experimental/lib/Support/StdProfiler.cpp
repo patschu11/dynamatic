@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "experimental/Support/StdProfiler.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/IR/Dominance.h"
 
 #include <fstream>
@@ -25,9 +26,19 @@ static bool isUnsigned(const std::string &str) {
                      [](char c) { return isdigit(c) || c == ' '; });
 }
 
-ArchBB::ArchBB(unsigned srcBB, unsigned dstBB, unsigned numTrans,
-               bool isBackEdge)
-    : srcBB(srcBB), dstBB(dstBB), numTrans(numTrans), isBackEdge(isBackEdge){};
+/// Determines which boolean value leads to the given block transition. This
+/// only makes sense for conditional branches (for unconditional branches,
+/// always returns false).
+static bool getCond(Block *src, Block *dst) {
+  Operation *termOp = src->getTerminator();
+  if (isa<cf::BranchOp>(termOp))
+    return false;
+  cf::CondBranchOp condBrOp = cast<cf::CondBranchOp>(termOp);
+  if (condBrOp.getTrueDest() == dst)
+    return true;
+  assert(condBrOp.getFalseDest() == dst && "incorrect block transition");
+  return false;
+}
 
 StdProfiler::StdProfiler(mlir::func::FuncOp funcOp) : funcOp(funcOp){};
 
@@ -70,7 +81,7 @@ void StdProfiler::writeDOT(mlir::raw_indented_ostream &os) {
 
 void StdProfiler::writeCSV(mlir::raw_indented_ostream &os) {
   // Print column names
-  os << "srcBlock,dstBlock,numTransitions,is_backedge\n";
+  os << "srcBlock,dstBlock,numTransitions,cond,is_backedge\n";
 
   // Assign a unique id to each block based on their order of appearance in
   // the function
@@ -85,6 +96,7 @@ void StdProfiler::writeCSV(mlir::raw_indented_ostream &os) {
   for (auto &[blockPair, numTrans] : transitions)
     os << getCSVTransitionString(
         blockIDs[blockPair.first], blockIDs[blockPair.second], numTrans,
+        getCond(blockPair.first, blockPair.second),
         domInfo.dominates(blockPair.second, blockPair.first));
 
   // Assign a frequency of 0 to block transitions that never occured in the
@@ -93,6 +105,7 @@ void StdProfiler::writeCSV(mlir::raw_indented_ostream &os) {
     for (auto *succ : block.getSuccessors())
       if (!transitions.contains(std::make_pair(&block, succ)))
         os << getCSVTransitionString(blockIDs[&block], blockIDs[succ], 0,
+                                     getCond(&block, succ),
                                      domInfo.dominates(succ, &block));
 }
 
@@ -125,13 +138,14 @@ LogicalResult StdProfiler::readCSV(std::string &filename,
     std::istringstream iss(line);
 
     // Parse all 4 columns
-    unsigned srcBB, dstBB, numTrans, isBackEdge;
+    unsigned srcBB, dstBB, numTrans, cond, isBackEdge;
     if (parseToken(iss, srcBB) || parseToken(iss, dstBB) ||
-        parseToken(iss, numTrans) || parseToken(iss, isBackEdge))
+        parseToken(iss, numTrans) || parseToken(iss, cond) ||
+        parseToken(iss, isBackEdge))
       return failure();
 
     // Add the arch to the list
-    archs.emplace_back(srcBB, dstBB, numTrans, isBackEdge != 0);
+    archs.emplace_back(srcBB, dstBB, numTrans, cond != 0, isBackEdge != 0);
   }
   return success();
 }
@@ -145,8 +159,9 @@ std::string StdProfiler::getDOTTransitionString(std::string &srcBlock,
 
 std::string StdProfiler::getCSVTransitionString(unsigned srcBlock,
                                                 unsigned dstBlock,
-                                                unsigned freq,
+                                                unsigned freq, bool cond,
                                                 bool isBackedge) {
   return std::to_string(srcBlock) + "," + std::to_string(dstBlock) + "," +
-         std::to_string(freq) + "," + (isBackedge ? "1" : "0") + "\n";
+         std::to_string(freq) + "," + (cond ? "1" : "0") + "," +
+         (isBackedge ? "1" : "0") + "\n";
 }

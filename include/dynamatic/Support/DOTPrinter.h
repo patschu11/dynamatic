@@ -50,7 +50,9 @@ public:
              TimingDatabase *timingDB = nullptr);
 
   /// Prints Handshake-level IR to standard output.
-  LogicalResult printDOT(mlir::ModuleOp mod);
+  LogicalResult printDOT(mlir::ModuleOp mod,
+                         mlir::DenseSet<Operation *> *highlightOps = nullptr,
+                         mlir::DenseSet<Value> *highlightVals = nullptr);
 
 private:
   /// Printing mode (e.g., compatible with legacy tools or not).
@@ -62,6 +64,9 @@ private:
   TimingDatabase *timingDB;
   /// The stream to output to.
   mlir::raw_indented_ostream os;
+
+  mlir::DenseSet<Operation *> *highlightOps = nullptr;
+  mlir::DenseSet<Value> *highlightVals = nullptr;
 
   /// Maintain a mapping of module names and the number of times one of those
   /// modules have been instantiated in the design. This is used to generate

@@ -895,7 +895,9 @@ DOTPrinter::DOTPrinter(Mode mode, EdgeStyle edgeStyle, TimingDatabase *timingDB)
          timingDB && "timing database must exist in legacy mode");
 };
 
-LogicalResult DOTPrinter::printDOT(mlir::ModuleOp mod) {
+LogicalResult DOTPrinter::printDOT(mlir::ModuleOp mod,
+                                   mlir::DenseSet<Operation *> *highlightOps,
+                                   mlir::DenseSet<Value> *highlightVals) {
   // We support at most one function per module
   auto funcs = mod.getOps<handshake::FuncOp>();
   if (funcs.empty())
@@ -930,6 +932,8 @@ LogicalResult DOTPrinter::printDOT(mlir::ModuleOp mod) {
   mlir::raw_indented_ostream os(llvm::outs());
 
   // Print the graph
+  this->highlightOps = highlightOps;
+  this->highlightVals = highlightVals;
   return printFunc(funcOp);
 }
 
@@ -1033,8 +1037,10 @@ LogicalResult DOTPrinter::printEdge(Operation *src, Operation *dst, Value val) {
      << getStyleOfValue(val);
   if (legacy && failed(annotateEdge(src, dst, val)))
     return failure();
-  if (isBackedge(val, dst))
-    os << (legacy ? ", " : "") << " color=\"blue\"";
+  // if (isBackedge(val, dst))
+  //   os << (legacy ? ", " : "") << " color=\"blue\"";
+  if (highlightVals->contains(val))
+    os << " color=red ";
   os << "]\n";
   return success();
 }
@@ -1077,6 +1083,8 @@ LogicalResult DOTPrinter::printFunc(handshake::FuncOp funcOp) {
     auto argLabel = getArgumentName(funcOp, arg.index());
     os << "\"" << argLabel << R"(" [mlir_op="handshake.arg", shape=diamond, )"
        << getStyleOfValue(arg.value()) << "label=\"" << argLabel << "\", ";
+    if (highlightVals->contains(arg.value()))
+      os << " color=red ";
     if (legacy && failed(annotateArgumentNode(funcOp, arg.index())))
       return failure();
     os << "]\n";
@@ -1120,6 +1128,8 @@ LogicalResult DOTPrinter::printFunc(handshake::FuncOp funcOp) {
           auto argLabel = getArgumentName(funcOp, idx);
           os << "\"" << argLabel << "\" -> \"" << getNodeName(user) << "\" ["
              << getStyleOfValue(arg);
+          if (highlightVals->contains(arg))
+            os << " color=red ";
           if (legacy && failed(annotateArgumentEdge(funcOp, idx, user)))
             return failure();
           os << "]\n";

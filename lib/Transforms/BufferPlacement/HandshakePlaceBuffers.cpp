@@ -144,21 +144,21 @@ static LogicalResult verifyFuncValidForPlacement(FuncInfo &info) {
         op.emitWarning() << "Operation does not belong to any block, MILP "
                             "behavior may be suboptimal or incorrect.";
 
-    std::optional<unsigned> srcBB = opBlocks[&op];
-    for (OpResult res : op.getResults()) {
-      Operation *user = *res.getUsers().begin();
-      std::optional<unsigned> dstBB = opBlocks[user];
+    // std::optional<unsigned> srcBB = opBlocks[&op];
+    // for (OpResult res : op.getResults()) {
+    //   Operation *user = *res.getUsers().begin();
+    //   std::optional<unsigned> dstBB = opBlocks[user];
 
-      // All transitions between blocks must exist in the original CFG
-      if (srcBB.has_value() && dstBB.has_value() && *srcBB != *dstBB &&
-          !transitions[*srcBB].contains(*dstBB))
-        return op.emitError()
-               << "Result " << res.getResultNumber() << " defined in block "
-               << *srcBB << " is used in block " << *dstBB
-               << ". This connection does not exist according to the CFG "
-                  "graph. Solving the buffer placement MILP would yield an "
-                  "incorrect placement.";
-    }
+    //   // All transitions between blocks must exist in the original CFG
+    //   if (srcBB.has_value() && dstBB.has_value() && *srcBB != *dstBB &&
+    //       !transitions[*srcBB].contains(*dstBB))
+    //     return op.emitError()
+    //            << "Result " << res.getResultNumber() << " defined in block "
+    //            << *srcBB << " is used in block " << *dstBB
+    //            << ". This connection does not exist according to the CFG "
+    //               "graph. Solving the buffer placement MILP would yield an "
+    //               "incorrect placement.";
+    // }
   }
   return success();
 }

@@ -37,11 +37,16 @@ struct ArchBB {
   unsigned dstBB;
   /// Number of transitions recoded between the two blocks.
   unsigned numTrans;
+  /// For conditional branches, side of the branch the arch represents.
+  bool cond;
   /// Is the arch a backedge?
   bool isBackEdge;
 
   /// Simple field-by-field constructor.
-  ArchBB(unsigned srcBB, unsigned dstBB, unsigned numTrans, bool isBackEdge);
+  ArchBB(unsigned srcBB, unsigned dstBB, unsigned numTrans, bool cond,
+         bool isBackEdge)
+      : srcBB(srcBB), dstBB(dstBB), numTrans(numTrans), cond(cond),
+        isBackEdge(isBackEdge){};
 };
 
 /// Data structure to hold information about the simulation.
@@ -81,7 +86,7 @@ private:
   /// Produces a CSV formatted string corresponding to a transition between two
   /// blocks.
   std::string getCSVTransitionString(unsigned srcBlock, unsigned dstBlock,
-                                     unsigned freq, bool isBackedge);
+                                     unsigned freq, bool cond, bool isBackedge);
 };
 } // namespace experimental
 } // namespace dynamatic

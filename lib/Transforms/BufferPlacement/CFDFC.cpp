@@ -18,6 +18,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/Support/IndentedOstream.h"
+#include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/SmallSet.h"
 #include <fstream>
@@ -183,57 +184,67 @@ CFDFC::CFDFC(circt::handshake::FuncOp funcOp, ArchSet &archs, unsigned numExec)
     }
   }
   assert(cycle.size() == archs.size() && "failed to construct cycle");
+  SetVector<Operation *> toExplore;
 
+  // Collect all operations in the cycle
   for (Operation &op : funcOp.getOps()) {
-    // Get operation's basic block
-    unsigned srcBB;
-    if (auto optBB = getLogicBB(&op); !optBB.has_value())
-      continue;
-    else
-      srcBB = *optBB;
-
-    // The basic block the operation belongs to must be selected
-    if (!cycle.contains(srcBB))
-      continue;
-
-    // Add the unit and valid outgoing channels to the CFDFC
-    units.insert(&op);
-    for (OpResult res : op.getResults()) {
-      assert(std::distance(res.getUsers().begin(), res.getUsers().end()) == 1 &&
-             "value must have unique user");
-
-      // Get the value's unique user and its basic block
-      Operation *user = *res.getUsers().begin();
-      unsigned dstBB;
-      if (std::optional<unsigned> optBB = getLogicBB(user); !optBB.has_value())
-        continue;
-      else
-        dstBB = *optBB;
-
-      if (srcBB != dstBB) {
-        // The channel is in the CFDFC if it belongs belong to a selected arch
-        // between two basic blocks
-        for (size_t i = 0; i < cycle.size(); ++i) {
-          unsigned nextBB = i == cycle.size() - 1 ? 0 : i + 1;
-          if (srcBB == cycle[i] && dstBB == cycle[nextBB]) {
-            channels.insert(res);
-            if (isCFDFCBackedge(res))
-              backedges.insert(res);
-            break;
-          }
-        }
-      } else if (cycle.size() == 1) {
-        // The channel is in the CFDFC if its producer/consumer belong to the
-        // same basic block and the CFDFC is just a block looping to itself
-        channels.insert(res);
-        if (isCFDFCBackedge(res))
-          backedges.insert(res);
-      } else if (!isBackedge(res)) {
-        // The channel is in the CFDFC if its producer/consumer belong to the
-        // same basic block and the channel is not a backedge
-        channels.insert(res);
+    if (isa<handshake::ConditionalBranchOp>(op)) {
+      if (auto optBB = getLogicBB(&op);
+          optBB.has_value() && cycle.contains(*optBB)) {
+        toExplore.insert(&op);
+        units.insert(&op);
       }
     }
+  }
+
+  while (!toExplore.empty()) {
+    Operation *srcOp = toExplore.pop_back_val();
+
+    // Get the operation's basic block (by construction it exists)
+    unsigned srcBB = *getLogicBB(srcOp);
+
+    auto recExplore = [&](Value val) {
+      Operation *dstOp = *val.getUsers().begin();
+      std::optional<unsigned> optBB = getLogicBB(dstOp);
+      if (!optBB.has_value())
+        return;
+
+      // Add the value to the list of channels (and potentially backedges)
+      channels.insert(val);
+      if (isCFDFCBackedge(val))
+        backedges.insert(val);
+    };
+
+    if (auto condBrOp = dyn_cast<handshake::ConditionalBranchOp>(srcOp)) {
+      // Find out which is the next basic block in the cycle
+      unsigned nextBB;
+      for (auto [idx, cycleBB] : llvm::enumerate(cycle)) {
+        if (cycleBB == srcBB) {
+          nextBB = cycle[idx == cycle.size() - 1 ? 0 : idx + 1];
+          break;
+        }
+      }
+
+      // Select the branch output that is in the cycle
+      Value outputInCycle;
+      for (ArchBB *arch : archs) {
+        if (arch->srcBB == srcBB && arch->dstBB == nextBB) {
+          outputInCycle =
+              arch->cond ? condBrOp.getTrueResult() : condBrOp.getFalseResult();
+          break;
+        }
+      }
+      assert(outputInCycle && "failed to find arch");
+
+      // Recursively explore the output branch that corresponds to the next
+      // block transition
+      recExplore(outputInCycle);
+      continue;
+    }
+
+    // Recursively explore through all outgoing channels
+    for (OpResult res : srcOp->getResults())
+      recExplore(res);
   }
 }
 
