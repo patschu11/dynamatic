@@ -256,6 +256,24 @@ bool CFDFC::isCFDFCBackedge(Value val) {
   return srcBB.has_value() && (!dstBB.has_value() || *srcBB != *dstBB);
 }
 
+CFDFCUnion::CFDFCUnion(ArrayRef<CFDFC *> cfdfcs) {
+  // Just do the union of everything
+  for (CFDFC *cf : cfdfcs) {
+    // Blocks
+    for (unsigned bb : cf->cycle)
+      blocks.insert(bb);
+    // Units
+    for (Operation *op : cf->units)
+      units.insert(op);
+    // Channels
+    for (Value val : cf->channels)
+      channels.insert(val);
+    // Backedges
+    for (Value val : cf->backedges)
+      backedges.insert(val);
+  }
+}
+
 LogicalResult dynamatic::buffer::extractCFDFC(handshake::FuncOp funcOp,
                                               ArchSet &archs, BBSet &bbs,
                                               ArchSet &selectedArchs,

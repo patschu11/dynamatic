@@ -18,8 +18,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef DYNAMATIC_TRANSFORMS_BUFFERPLACEMENT_FPGA20PLACEMENT_H
-#define DYNAMATIC_TRANSFORMS_BUFFERPLACEMENT_FPGA20PLACEMENT_H
+#ifndef DYNAMATIC_TRANSFORMS_BUFFERPLACEMENT_FPGA20BUFFERS_H
+#define DYNAMATIC_TRANSFORMS_BUFFERPLACEMENT_FPGA20BUFFERS_H
 
 #include "dynamatic/Support/LLVM.h"
 #include "dynamatic/Transforms/BufferPlacement/BufferPlacementMILP.h"
@@ -185,4 +185,4 @@ protected:
 } // namespace dynamatic
 #endif // DYNAMATIC_GUROBI_NOT_INSTALLED
 
-#endif // DYNAMATIC_TRANSFORMS_BUFFERPLACEMENT_FPGA20PLACEMENT_H
+#endif // DYNAMATIC_TRANSFORMS_BUFFERPLACEMENT_FPGA20BUFFERS_H

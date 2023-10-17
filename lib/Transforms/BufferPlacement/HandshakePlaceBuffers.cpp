@@ -19,6 +19,7 @@
 #include "dynamatic/Support/LogicBB.h"
 #include "dynamatic/Transforms/BufferPlacement/CFDFC.h"
 #include "dynamatic/Transforms/BufferPlacement/FPGA20Buffers.h"
+#include "dynamatic/Transforms/BufferPlacement/FPL22Buffers.h"
 #include "experimental/Support/StdProfiler.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -164,6 +165,11 @@ static LogicalResult verifyFuncValidForPlacement(FuncInfo &info) {
 
 #endif // DYNAMATIC_GUROBI_NOT_INSTALLED
 
+/// Set of available algorithms for buffer placement
+static const std::string FPGA20 = "fpga20", FPGA20_LEGACY = "fpga20-legacy",
+                         FPL22 = "fpl22";
+static const std::set<std::string> ALGORITHMS{FPGA20, FPGA20_LEGACY, FPL22};
+
 namespace {
 struct HandshakePlaceBuffersPass
     : public dynamatic::buffer::impl::HandshakePlaceBuffersBase<
@@ -194,10 +200,14 @@ struct HandshakePlaceBuffersPass
     DenseMap<handshake::FuncOp, FuncInfo> funcToInfo;
 
     // Check that the algorithm exists
-    if (algorithm != "fpga20" && algorithm != "fpga20-legacy") {
-      modOp->emitError()
-          << "Unknown algorithm '" << algorithm
-          << "', possible choices are 'fpga20', 'fpga20-legacy'.";
+    if (ALGORITHMS.count(algorithm) > 1) {
+      llvm::errs() << "Unknown algorithm '" << algorithm
+                   << "', possible choices are ";
+      for (auto [idx, algo] : llvm::enumerate(ALGORITHMS)) {
+        llvm::errs() << algo;
+        if (idx != ALGORITHMS.size() - 1)
+          llvm::errs() << ", ";
+      }
       return signalPassFailure();
     }
 
@@ -349,12 +359,15 @@ LogicalResult HandshakePlaceBuffersPass::getBufferPlacement(
 
   // Create and solve the MILP
   BufferPlacementMILP *milp = nullptr;
-  if (algorithm == "fpga20")
+  if (algorithm == FPGA20)
     milp = new fpga20::FPGA20Buffers(info, timingDB, env, milpLog, targetCP,
                                      targetCP * 2.0, false);
-  else if (algorithm == "fpga20-legacy")
+  else if (algorithm == FPGA20_LEGACY)
     milp = new fpga20::FPGA20Buffers(info, timingDB, env, milpLog, targetCP,
                                      targetCP * 2.0, true);
+  else if (algorithm == FPL22)
+    milp = new fpl22::FPL22Buffers(info, timingDB, env, milpLog, targetCP,
+                                   targetCP * 2.0);
   assert(milp && "unknown placement algorithm");
   bool milpRet =
       succeeded(milp->optimize()) && succeeded(milp->getPlacement(placement));
