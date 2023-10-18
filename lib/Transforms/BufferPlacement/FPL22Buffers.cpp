@@ -10,17 +10,13 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/ADT/SetOperations.h"
-#include <unordered_set>
-#ifndef DYNAMATIC_GUROBI_NOT_INSTALLED
-#include "gurobi_c++.h"
-
+#include "dynamatic/Transforms/BufferPlacement/FPL22Buffers.h"
 #include "circt/Dialect/Handshake/HandshakeDialect.h"
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "circt/Dialect/Handshake/HandshakePasses.h"
 #include "dynamatic/Support/LogicBB.h"
 #include "dynamatic/Transforms/BufferPlacement/BufferingProperties.h"
-#include "dynamatic/Transforms/BufferPlacement/FPL22Buffers.h"
+#include "dynamatic/Transforms/BufferPlacement/CFDFC.h"
 #include "dynamatic/Transforms/PassDetails.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -30,6 +26,11 @@
 #include "mlir/IR/Value.h"
 #include "mlir/Support/IndentedOstream.h"
 #include "mlir/Support/LogicalResult.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SetOperations.h"
+
+#ifndef DYNAMATIC_GUROBI_NOT_INSTALLED
+#include "gurobi_c++.h"
 
 using namespace llvm::sys;
 using namespace circt;
@@ -37,8 +38,6 @@ using namespace mlir;
 using namespace dynamatic;
 using namespace dynamatic::buffer;
 using namespace dynamatic::buffer::fpl22;
-
-using BlockSet = std::unordered_set<unsigned>;
 
 FPL22Buffers::FPL22Buffers(FuncInfo &funcInfo, const TimingDatabase &timingDB,
                            GRBEnv &env, Logger *logger, double targetPeriod,
@@ -48,46 +47,13 @@ FPL22Buffers::FPL22Buffers(FuncInfo &funcInfo, const TimingDatabase &timingDB,
   if (status == MILPStatus::UNSAT_PROPERTIES)
     return;
 
-  // Compute the list of CFDFCs unions
-  SmallVector<std::pair<BlockSet, SmallVector<CFDFC *>>> disjointBlockSets;
-  for (auto &cfAndOpt : funcInfo.cfdfcs) {
-    CFDFC *cf = cfAndOpt.first;
-
-    auto insertFromCycle = [&](BlockSet &set) -> void {
-      for (unsigned bb : cf->cycle)
-        set.insert(bb);
-    };
-
-    bool foundGroup = false;
-    for (auto &[blockSet, cfdfcs] : disjointBlockSets) {
-      // Insert all blocks in the CFDFC cycle inside a set for comparison with
-      // the blockSet
-      BlockSet cycleSet;
-      insertFromCycle(cycleSet);
-      llvm::set_intersect(cycleSet, blockSet);
-
-      if (cycleSet.empty())
-        // Intersection between cycleSet and blockSet is empty
-        continue;
-
-      // If some element remains in cycleSet, it means that it was already in
-      // blockSet and that the CFDFC belongs in that group
-      insertFromCycle(blockSet);
-      cfdfcs.push_back(cf);
-      foundGroup = true;
-      break;
-    }
-
-    if (!foundGroup) {
-      // Create a new group for the CFDFC, since it has no common block with any
-      // other group
-      BlockSet cycleSet;
-      insertFromCycle(cycleSet);
-      disjointBlockSets.emplace_back(cycleSet, SmallVector<CFDFC *>{cf});
-    }
-  }
-  for (auto &[blockSet, cfdfcs] : disjointBlockSets)
-    cfdfcUnions.emplace_back(cfdfcs);
+  // Create disjoint block unions of all CFDFCs
+  SmallVector<CFDFC *, 8> cfdfcs;
+  llvm::transform(funcInfo.cfdfcs, std::back_inserter(cfdfcs),
+                  [](auto cfAndOpt) { return cfAndOpt.first; });
+  getDisjointBlockUnions(cfdfcs, disjointUnions);
+  if (logger)
+    logCFDFCUnions();
 
   if (succeeded(setup()))
     status = BufferPlacementMILP::MILPStatus::READY;
@@ -111,6 +77,49 @@ LogicalResult FPL22Buffers::setup() { return failure(); }
 LogicalResult FPL22Buffers::createVars() {
   model.update();
   return failure();
+}
+
+void FPL22Buffers::logCFDFCUnions() {
+  assert(logger && "no logger was provided");
+  mlir::raw_indented_ostream &os = **logger;
+
+  // Map each individual CFDFC to its iteration index
+  std::map<CFDFC *, size_t> cfIndices;
+  for (auto [idx, cfAndOpt] : llvm::enumerate(funcInfo.cfdfcs))
+    cfIndices[cfAndOpt.first] = idx;
+
+  os << "# ====================== #\n";
+  os << "# Disjoint CFDFCs Unions #\n";
+  os << "# ====================== #\n\n";
+
+  // For each CFDFC union, display the blocks it encompasses as well as the
+  // individual CFDFCs that fell into it
+  for (auto [idx, cfUnion] : llvm::enumerate(disjointUnions)) {
+
+    // Display the blocks making up the union
+    auto blockIt = cfUnion.blocks.begin(), blockEnd = cfUnion.blocks.end();
+    os << "CFDFC Union #" << idx << ": " << *blockIt;
+    while (++blockIt != blockEnd)
+      os << ", " << *blockIt;
+    os << "\n";
+
+    // Display the block cycle of each CFDFC in the union and some meta
+    // information about the union
+    os.indent();
+    for (CFDFC *cf : cfUnion.cfdfcs) {
+      auto cycleIt = cf->cycle.begin(), cycleEnd = cf->cycle.end();
+      os << "- CFDFC #" << cfIndices[cf] << ": " << *cycleIt;
+      while (++cycleIt != cycleEnd)
+        os << " -> " << *cycleIt;
+      os << "\n";
+    }
+    os << "- Number of block: " << cfUnion.blocks.size() << "\n";
+    os << "- Number of units: " << cfUnion.units.size() << "\n";
+    os << "- Number of channels: " << cfUnion.channels.size() << "\n";
+    os << "- Number of backedges: " << cfUnion.backedges.size() << "\n";
+    os.unindent();
+    os << "\n";
+  }
 }
 
 #endif // DYNAMATIC_GUROBI_NOT_INSTALLED

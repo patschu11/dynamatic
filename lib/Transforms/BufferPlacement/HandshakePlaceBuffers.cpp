@@ -365,9 +365,12 @@ LogicalResult HandshakePlaceBuffersPass::getBufferPlacement(
   else if (algorithm == FPGA20_LEGACY)
     milp = new fpga20::FPGA20Buffers(info, timingDB, env, milpLog, targetCP,
                                      targetCP * 2.0, true);
-  else if (algorithm == FPL22)
+  else if (algorithm == FPL22) {
     milp = new fpl22::FPL22Buffers(info, timingDB, env, milpLog, targetCP,
                                    targetCP * 2.0);
+    delete milp;
+    return success();
+  }
   assert(milp && "unknown placement algorithm");
   bool milpRet =
       succeeded(milp->optimize()) && succeeded(milp->getPlacement(placement));

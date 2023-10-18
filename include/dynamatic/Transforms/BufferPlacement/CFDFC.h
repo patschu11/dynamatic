@@ -58,8 +58,13 @@ private:
   static bool isCFDFCBackedge(Value val);
 };
 
-/// TODO
+/// Represents a union of CFDFCs. Its blocks, units, channels, and backedges are
+/// unions of the corresponding elements from all the CFDFCs that make it up. A
+/// CFDFC union, unlike a regular CFDFC, does not contain a number of executions
+/// since it does not make sense in the context of a union.
 struct CFDFCUnion {
+  /// The individual CFDFCs the union is made up of.
+  SmallVector<CFDFC *> cfdfcs;
   /// The set basic blocks that make up the CFDFC union.
   mlir::SetVector<unsigned> blocks;
   /// Units (i.e., MLIR operations) in the CFDFC union.
@@ -69,9 +74,18 @@ struct CFDFCUnion {
   /// Backedges in the CFDFC union.
   mlir::SetVector<Value> backedges;
 
-  /// Constructs the CFDFC union from an array of individual CFDFCs.
+  /// Constructs the CFDFC union from an array of individual CFDFCs. The CFDFCs
+  /// must outlive the union, which stores pointers to them.
   CFDFCUnion(ArrayRef<CFDFC *> cfdfcs);
-}
+};
+
+/// Computes a set of CFDFC unions from a list of CFDFCs where each CFDFC in
+/// each union shares at least one block with at least one other CFDFC of the
+/// same union, and any two CFDFCs in different unions are completely disjoint.
+/// Internally uses a disjoint-set data-structure for fast computation times and
+/// low memory footprint.
+void getDisjointBlockUnions(ArrayRef<CFDFC *> cfdfcs,
+                            std::vector<CFDFCUnion> &unions);
 
 /// Extracts the most frequently executed CFDFC from the Handshake function
 /// described by the provided archs and basic blocks. The function internally
@@ -81,10 +95,9 @@ struct CFDFCUnion {
 /// respectively, the set of archs included in the extracted CFDFC and the
 /// number of executions of the latter. When no CFDFC could be extracted,
 /// succeeds but sets the number of executions to 0.
-LogicalResult
-extractCFDFC(circt::handshake::FuncOp funcOp, ArchSet &archs, BBSet &bbs,
-             ArchSet &selectedArchs, unsigned &numExec,
-             const std::string &logPath = "");
+LogicalResult extractCFDFC(circt::handshake::FuncOp funcOp, ArchSet &archs,
+                           BBSet &bbs, ArchSet &selectedArchs,
+                           unsigned &numExec, const std::string &logPath = "");
 
 } // namespace buffer
 } // namespace dynamatic

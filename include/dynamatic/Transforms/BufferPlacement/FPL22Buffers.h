@@ -18,6 +18,7 @@
 #include "dynamatic/Transforms/BufferPlacement/BufferingProperties.h"
 #include "dynamatic/Transforms/BufferPlacement/CFDFC.h"
 #include "llvm/ADT/MapVector.h"
+#include <set>
 
 #ifndef DYNAMATIC_GUROBI_NOT_INSTALLED
 #include "gurobi_c++.h"
@@ -71,12 +72,12 @@ public:
 protected:
   /// Contains all variables used throughout the MILP.
   MILPVars vars;
-  /// All CFDFC unions, determined from the individual CFDFCs extracted from the
-  /// function. Each CFDFC union is made up of all elements (blocks, units,
-  /// channels, backedges) that are part of at least one of the CFDFCs that it
-  /// was created from. Two CFDFCs end up in the same CFDFC union if they span
-  /// over at least one common basic block.
-  SmallVector<CFDFCUnion> cfdfcUnions;
+  /// All disjoint sets of CFDFC unions, determined from the individual CFDFCs
+  /// extracted from the function. Each CFDFC union is made up of all elements
+  /// (blocks, units, channels, backedges) that are part of at least one of the
+  /// CFDFCs that it was created from. Two CFDFCs end up in the same CFDFC union
+  /// if they span over at least one common basic block.
+  std::vector<CFDFCUnion> disjointUnions;
 
   /// Setups the entire MILP, first creating all variables, then all
   /// constraints, and finally setting the system's objective. Called by the
@@ -89,7 +90,7 @@ protected:
 
   /// Logs placement decisisons and achieved throuhgputs after MILP
   /// optimization. Asserts if the logger is nullptr.
-  void logResults(DenseMap<Value, PlacementResult> &placement);
+  void logCFDFCUnions();
 };
 
 } // namespace fpl22
