@@ -14,12 +14,16 @@
 #define DYNAMATIC_CONVERSION_PASSES_TD
 
 include "mlir/Pass/PassBase.td"
+include "dynamatic/Support/Passes.td"
 
 //===----------------------------------------------------------------------===//
 // AffineToScf
 //===----------------------------------------------------------------------===//
 
-def AffineToScf : Pass<"lower-affine-to-scf", "mlir::ModuleOp"> {
+def AffineToScf : DynamaticPass<"lower-affine-to-scf",
+                                [ "mlir::memref::MemRefDialect", 
+                                  "mlir::scf::SCFDialect", 
+                                  "mlir::vector::VectorDialect" ]> {
   let summary = "Lower affine operations to a mix of SCF and standard operations";
   let description = [{
     Very close analog to the AffineToStandard pass from MLIR that preserves the
@@ -29,18 +33,14 @@ def AffineToScf : Pass<"lower-affine-to-scf", "mlir::ModuleOp"> {
     particular to the std-to-handshake lowering pass. 
   }];
   let constructor = "dynamatic::createAffineToScfPass()";
-  let dependentDialects = [
-    "mlir::memref::MemRefDialect",
-    "mlir::scf::SCFDialect",
-    "mlir::vector::VectorDialect"
-  ];
 }
 
 //===----------------------------------------------------------------------===//
 // ScfToCf
 //===----------------------------------------------------------------------===//
 
-def ScfToCf : Pass<"lower-scf-to-cf", "mlir::ModuleOp"> {
+def ScfToCf : DynamaticPass<"lower-scf-to-cf", [
+    "mlir::cf::ControlFlowDialect", "mlir::arith::ArithDialect"]> {
   let summary = "Lower scf dialect to unstructured control flow (cf)";
   let description = [{
     Very close analog to the SCFToControlFlow pass from MLIR that replaces the
@@ -50,37 +50,30 @@ def ScfToCf : Pass<"lower-scf-to-cf", "mlir::ModuleOp"> {
     always positive.
   }];
   let constructor = "dynamatic::createLowerScfToCf()";
-  let dependentDialects = [
-    "mlir::cf::ControlFlowDialect", "mlir::arith::ArithDialect"];
 }
 
 //===----------------------------------------------------------------------===//
 // StandardToHandshakeFPGA18
 //===----------------------------------------------------------------------===//
 
-def StandardToHandshakeFPGA18 : Pass<"lower-std-to-handshake-fpga18", "mlir::ModuleOp"> {
-  let summary = "Lower Standard MLIR into Handshake IR following elastic pass described in FPGA18";
+def StandardToHandshakeFPGA18 : DynamaticPass<"lower-std-to-handshake-fpga18"> {
+  let summary = "Lowers cf-level IR to Handshake.";
   let constructor = "dynamatic::createStandardToHandshakeFPGA18Pass()";
-  let dependentDialects = ["circt::handshake::HandshakeDialect"];
-  let options =
-    [Option<"idBasicBlocks", "id-basic-blocks", "bool", "false",
-            "If true, will attach a 'bb' attribute to each operation in the "
-            "resulting IR to identify the basic block from which the "
-            "operation originates.">];
 }
 
 //===----------------------------------------------------------------------===//
 // HandshakeToNetlist
 //===----------------------------------------------------------------------===//
 
-def HandshakeToNetlist : Pass<"lower-handshake-to-netlist", "mlir::ModuleOp"> {
+def HandshakeToNetlist : DynamaticPass< "lower-handshake-to-netlist",
+                                        [ "circt::hw::HWDialect",  
+                                          "circt::esi::ESIDialect" ]> {
   let summary = "Lower Handshake to ESI/HW (netlist)";
   let description = [{
     Lower Handshake IR into a "netlist-level" representation made up of HW
     instances of external modules interconnected by ESI channels.
   }];
   let constructor = "dynamatic::createHandshakeToNetlistPass()";
-  let dependentDialects = ["circt::hw::HWDialect", "circt::esi::ESIDialect"];
 }
 
 #endif // DYNAMATIC_CONVERSION_PASSES_TD

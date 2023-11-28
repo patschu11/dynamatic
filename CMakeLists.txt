@@ -64,6 +64,8 @@ option(LLVM_BUILD_TOOLS "Build the LLVM tools. If OFF, just generate build targe
 # Dynamatic configuration 
 #-------------------------------------------------------------------------------
 
+option(DYNAMATIC_BUILD_VISUALIZER "Disable the vivado synthesis tests." OFF)
+
 # Define some variables for Dynamatic
 set(DYNAMATIC_SOURCE_DIR ${CMAKE_SOURCE_DIR})
 set(DYNAMATIC_INCLUDE_DIR ${DYNAMATIC_SOURCE_DIR}/include)
@@ -114,6 +116,7 @@ else()
   message(WARNING "Gurobi wasn't found, the buffer placement infrastructure \
                    that requires solving an MILP will not be built with the \
                    project.")
+  add_compile_definitions(DYNAMATIC_GUROBI_NOT_INSTALLED)
 endif()
 
 #-------------------------------------------------------------------------------

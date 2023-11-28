@@ -32,7 +32,7 @@ using namespace dynamatic;
 /// Determines if the pass should attempt to infer the basic block of the
 /// operation if it is missing.
 static bool isLegalForInference(Operation *op) {
-  return !isa<handshake::MemoryControllerOp, handshake::SinkOp>(op);
+  return !isa<handshake::MemoryOpInterface, handshake::SinkOp>(op);
 }
 
 /// Iterates over all operations legal for inference that do not have a "bb"
@@ -134,7 +134,7 @@ struct FuncOpInferBasicBlocks : public OpConversionPattern<handshake::FuncOp> {
 struct HandshakeInferBasicBlocksPass
     : public HandshakeInferBasicBlocksBase<HandshakeInferBasicBlocksPass> {
 
-  void runOnOperation() override {
+  void runDynamaticPass() override {
     MLIRContext *ctx = &getContext();
     RewritePatternSet patterns{ctx};
     patterns.add<FuncOpInferBasicBlocks>(ctx);
@@ -147,7 +147,7 @@ struct HandshakeInferBasicBlocksPass
 };
 } // namespace
 
-std::unique_ptr<mlir::OperationPass<mlir::ModuleOp>>
+std::unique_ptr<dynamatic::DynamaticPass>
 dynamatic::createHandshakeInferBasicBlocksPass() {
   return std::make_unique<HandshakeInferBasicBlocksPass>();
 }

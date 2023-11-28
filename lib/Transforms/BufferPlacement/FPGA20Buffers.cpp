@@ -10,15 +10,13 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef DYNAMATIC_GUROBI_NOT_INSTALLED
-#include "gurobi_c++.h"
-
+#include "dynamatic/Transforms/BufferPlacement/FPGA20Buffers.h"
 #include "circt/Dialect/Handshake/HandshakeDialect.h"
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "circt/Dialect/Handshake/HandshakePasses.h"
+#include "dynamatic/Analysis/NameAnalysis.h"
 #include "dynamatic/Support/LogicBB.h"
-#include "dynamatic/Transforms/BufferPlacement/BufferingProperties.h"
-#include "dynamatic/Transforms/BufferPlacement/FPGA20Buffers.h"
+#include "dynamatic/Transforms/BufferPlacement/BufferingSupport.h"
 #include "dynamatic/Transforms/PassDetails.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -28,6 +26,9 @@
 #include "mlir/IR/Value.h"
 #include "mlir/Support/IndentedOstream.h"
 #include "mlir/Support/LogicalResult.h"
+
+#ifndef DYNAMATIC_GUROBI_NOT_INSTALLED
+#include "gurobi_c++.h"
 
 using namespace llvm::sys;
 using namespace circt;
@@ -123,8 +124,8 @@ LogicalResult FPGA20Buffers::setup() {
   std::vector<Value> nonMemChannels;
   llvm::copy_if(
       allChannels, std::back_inserter(nonMemChannels), [&](Value val) {
-        return !val.getDefiningOp<handshake::MemoryControllerOp>() &&
-               !isa<handshake::MemoryControllerOp>(*val.getUsers().begin());
+        return !val.getDefiningOp<handshake::MemoryOpInterface>() &&
+               !isa<handshake::MemoryOpInterface>(*val.getUsers().begin());
       });
 
   // Create custom, path, and elasticity constraints
@@ -169,8 +170,7 @@ LogicalResult FPGA20Buffers::createCFDFCVars(CFDFC &cfdfc, unsigned uid) {
   for (auto [idx, unit] : llvm::enumerate(cfdfc.units)) {
     // Create the two unit variables
     UnitVars unitVar;
-    std::string unitName =
-        nameUniquer.getName(*unit).str() + std::to_string(idx);
+    std::string unitName = getUniqueName(unit) + std::to_string(idx);
     std::string varName = prefix + "inRetimeTok_" + unitName;
     unitVar.retIn = createVar(varName);
 
@@ -189,9 +189,8 @@ LogicalResult FPGA20Buffers::createCFDFCVars(CFDFC &cfdfc, unsigned uid) {
 
   // Create a variable to represent the throughput of each CFDFC channel
   for (auto [idx, channel] : llvm::enumerate(cfdfc.channels))
-    cfdfcVars.channelThroughputs[channel] =
-        createVar(prefix + "throughput_" +
-                  nameUniquer.getName(*channel.getUses().begin()).str());
+    cfdfcVars.channelThroughputs[channel] = createVar(
+        prefix + "throughput_" + getUniqueName(*channel.getUses().begin()));
 
   // Create a variable for the CFDFC's throughput
   cfdfcVars.throughput = createVar(prefix + "throughput");
@@ -207,8 +206,7 @@ LogicalResult FPGA20Buffers::createChannelVars() {
     auto &channel = channelAndProps.first;
 
     // Construct a suffix for all variable names
-    std::string suffix =
-        "_" + nameUniquer.getName(*channel.getUses().begin()).str();
+    std::string suffix = "_" + getUniqueName(*channel.getUses().begin());
 
     // Create a Gurobi variable of the given type and name
     auto createVar = [&](char type, const std::string &name) {
@@ -240,12 +238,9 @@ FPGA20Buffers::addCustomChannelConstraints(ValueRange customChannels) {
       // Force the MILP to use opaque slots
       model.addConstr(chVars.bufIsOpaque == 1, "custom_forceOpaque");
       if (props.minTrans > 0) {
-        // If the properties ask for both opaque and transaprent slots, let
+        // If the properties ask for both opaque and transparent slots, let
         // opaque slots take over. Transparents slots will be placed "manually"
         // from the total number of slots indicated by the MILP's result
-        size_t idx;
-        Operation *producer = getChannelProducer(channel, &idx);
-        assert(producer && "channel producer must exist");
         unsigned minTotalSlots = props.minOpaque + props.minTrans;
         model.addConstr(chVars.bufNumSlots >= minTotalSlots,
                         "custom_minOpaqueAndTrans");
@@ -282,19 +277,61 @@ FPGA20Buffers::addCustomChannelConstraints(ValueRange customChannels) {
 LogicalResult
 FPGA20Buffers::addPathConstraints(ValueRange pathChannels,
                                   ArrayRef<Operation *> pathUnits) {
+  // Manually get the timing model for buffers
+  const TimingModel *bufModel = timingDB.getModel(OperationName(
+      handshake::BufferOp::getOperationName(), funcInfo.funcOp->getContext()));
+  double bigCst = targetPeriod * 10;
+
   // Add path constraints for channels
   for (Value channel : pathChannels) {
+
+    // Get delays for a buffer that would be placed on this channel
+    double inBufDelay = 0.0, outBufDelay = 0.0, dataBufDelay = 0.0;
+    if (bufModel) {
+      Type channelType = channel.getType();
+      unsigned bitwidth = 0;
+      if (isa<IntegerType, FloatType>(channelType))
+        bitwidth = channelType.getIntOrFloatBitWidth();
+      if (failed(bufModel->inputModel.dataDelay.getCeilMetric(bitwidth,
+                                                              inBufDelay)) ||
+          failed(bufModel->outputModel.dataDelay.getCeilMetric(bitwidth,
+                                                               outBufDelay)) ||
+          failed(bufModel->dataDelay.getCeilMetric(bitwidth, dataBufDelay)))
+        return failure();
+      // Add the input and output port delays to the total buffer delay
+      dataBufDelay += inBufDelay + outBufDelay;
+    }
+
     ChannelVars &chVars = vars.channels[channel];
+    ChannelBufProps &props = channels[channel];
     GRBVar &t1 = chVars.tPathIn;
     GRBVar &t2 = chVars.tPathOut;
+    GRBVar &present = chVars.bufPresent;
+    GRBVar &opaque = chVars.bufIsOpaque;
+
     // Arrival time at channel's input must be lower than target clock period
-    model.addConstr(t1 <= targetPeriod, "path_channelInPeriod");
+    model.addConstr(t1 + present * (props.inDelay + inBufDelay) <= targetPeriod,
+                    "path_channelInPeriod");
     // Arrival time at channel's output must be lower than target clock period
     model.addConstr(t2 <= targetPeriod, "path_channelOutPeriod");
-    // If there isn't an opaque buffer on the channel, arrival time at channel's
-    // output must be greater than at channel's input
-    model.addConstr(t2 >= t1 - maxPeriod * chVars.bufIsOpaque,
-                    "path_opaqueChannel");
+
+    // If there is an opaque buffer, arrival time at channel's output must be
+    // greater than the delay between the buffer's internal register and the
+    // post-buffer channel delay
+    double bufToOutDelay = outBufDelay + props.outDelay;
+    if (bufToOutDelay > 0)
+      model.addConstr(opaque * bufToOutDelay <= t2, "path_opaqueChannel");
+
+    // If there is a transparent buffer, arrival time at channel's output must
+    // be greater than at channel's input (+ whole channel and buffer delay)
+    double inToOutDelay = props.inDelay + dataBufDelay + props.outDelay;
+    model.addConstr(t1 + inToOutDelay - bigCst * (opaque - present + 1) <= t2,
+                    "path_transparentChannel");
+
+    // If there are no buffers, arrival time at channel's output must be greater
+    // than at channel's input (+ channel delay)
+    model.addConstr(t1 + props.delay - bigCst * present <= t2,
+                    "path_unbufferedChannel");
   }
 
   // Add path constraints for units
@@ -402,6 +439,11 @@ LogicalResult FPGA20Buffers::addThroughputConstraints(CFDFC &cfdfc) {
 
   // Add a set of constraints for each CFDFC channel
   for (auto &[channel, chThroughput] : cfdfcVars.channelThroughputs) {
+
+    // No throughput constraints on channels going to LSQ stores
+    if (isa<handshake::LSQStoreOp>(*channel.getUsers().begin()))
+      continue;
+
     Operation *srcOp = channel.getDefiningOp();
     Operation *dstOp = *(channel.getUsers().begin());
 
@@ -539,7 +581,7 @@ void FPGA20Buffers::logResults(DenseMap<Value, PlacementResult> &placement) {
     ChannelBufProps &props = channels[value];
 
     // Log placement decision
-    os << nameUniquer.getName(*value.getUses().begin()).str() << ":\n";
+    os << getUniqueName(*value.getUses().begin()) << ":\n";
     os.indent();
     std::stringstream propsStr;
     propsStr << props;
@@ -574,7 +616,7 @@ void FPGA20Buffers::logResults(DenseMap<Value, PlacementResult> &placement) {
     os << "Per-channel throughputs of CFDFC #" << idx << ":\n";
     os.indent();
     for (auto [val, channelTh] : cfVars.channelThroughputs) {
-      os << nameUniquer.getName(*val.getUses().begin()).str() << ": "
+      os << getUniqueName(*val.getUses().begin()) << ": "
          << channelTh.get(GRB_DoubleAttr_X) << "\n";
     }
     os.unindent();

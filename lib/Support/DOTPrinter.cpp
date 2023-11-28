@@ -15,9 +15,9 @@
 #include "dynamatic/Support/DOTPrinter.h"
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "circt/Dialect/Handshake/HandshakePasses.h"
+#include "dynamatic/Analysis/NameAnalysis.h"
 #include "dynamatic/Conversion/PassDetails.h"
 #include "dynamatic/Support/LogicBB.h"
-#include "dynamatic/Support/NameUniquer.h"
 #include "dynamatic/Transforms/HandshakeConcretizeIndexType.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -26,8 +26,10 @@
 #include "mlir/IR/Value.h"
 #include "mlir/Support/IndentedOstream.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/Support/ErrorHandling.h"
 #include <iomanip>
 #include <string>
+#include <utility>
 
 using namespace circt;
 using namespace circt::handshake;
@@ -195,155 +197,274 @@ static std::string getInputForEnd(handshake::EndOp op) {
   return getIOFromPorts(ports);
 }
 
-/// Produces the "in" attribute value of a handshake::DynamaticLoadOp.
-static std::string getInputForLoadOp(handshake::DynamaticLoadOp op) {
+/// Produces the "in" attribute value of a handshake::LoadOpInterface.
+static std::string getInputForLoadOp(handshake::LoadOpInterface op) {
   PortsData ports;
-  ports.emplace_back("in1", op.getData());
-  ports.emplace_back("in2", op.getAddress());
+  ports.emplace_back("in1", op.getDataInput());
+  ports.emplace_back("in2", op.getAddressInput());
   return getIOFromPorts(ports);
 }
 
-/// Produces the "out" attribute value of a handshake::DynamaticLoadOp.
-static std::string getOutputForLoadOp(handshake::DynamaticLoadOp op) {
+/// Produces the "out" attribute value of a handshake::LoadOpInterface.
+static std::string getOutputForLoadOp(handshake::LoadOpInterface op) {
   PortsData ports;
-  ports.emplace_back("out1", op.getDataResult());
-  ports.emplace_back("out2", op.getAddressResult());
+  ports.emplace_back("out1", op.getDataOutput());
+  ports.emplace_back("out2", op.getAddressOutput());
   return getIOFromPorts(ports);
 }
 
-/// Produces the "in" attribute value of a handshake::DynamaticStoreOp.
-static std::string getInputForStoreOp(handshake::DynamaticStoreOp op) {
+/// Produces the "in" attribute value of a handshake::StoreOpInterface.
+static std::string getInputForStoreOp(handshake::StoreOpInterface op) {
   PortsData ports;
-  ports.emplace_back("in1", op.getData());
-  ports.emplace_back("in2", op.getAddress());
+  ports.emplace_back("in1", op.getDataInput());
+  ports.emplace_back("in2", op.getAddressInput());
   return getIOFromPorts(ports);
 }
 
-/// Produces the "out" attribute value of a handshake::DynamaticStoreOp.
-static std::string getOutputForStoreOp(handshake::DynamaticStoreOp op) {
+/// Produces the "out" attribute value of a handshake::StoreOpInterface.
+static std::string getOutputForStoreOp(handshake::StoreOpInterface op) {
   PortsData ports;
-  ports.emplace_back("out1", op.getDataResult());
-  ports.emplace_back("out2", op.getAddressResult());
+  ports.emplace_back("out1", op.getDataOutput());
+  ports.emplace_back("out2", op.getAddressOutput());
   return getIOFromPorts(ports);
 }
 
-/// Produces the "in" attribute value of a handshake::MemoryControllerOp.
-static std::string getInputForMC(handshake::MemoryControllerOp op) {
-  MemPortsData allPorts, dataPorts;
+/// Produces the "in" attribute value of a memory interface.
+static std::string getInputForMemInterface(FuncMemoryPorts &funcPorts) {
+  MemPortsData portsData;
   unsigned ctrlIdx = 0, ldIdx = 0, stIdx = 0, inputIdx = 1;
-  size_t operandIdx = 0;
-  ValueRange inputs = op.getInputs();
+  MemoryOpInterface memOp = funcPorts.memOp;
+  ValueRange inputs = memOp.getMemOperands();
 
   // Add all control signals first
-  for (auto [idx, blockAccesses] : llvm::enumerate(op.getAccesses()))
-    if (op.bbHasControl(idx))
-      allPorts.emplace_back("in" + std::to_string(inputIdx++),
-                            inputs[operandIdx++],
-                            "c" + std::to_string(ctrlIdx++));
+  for (GroupMemoryPorts &blockPorts : funcPorts.groups) {
+    if (blockPorts.hasControl())
+      portsData.emplace_back("in" + std::to_string(inputIdx++),
+                             inputs[blockPorts.ctrlPort->getCtrlInputIndex()],
+                             "c" + std::to_string(ctrlIdx++));
+  }
 
   // Then all memory access signals
-  for (auto [idx, blockAccesses] : llvm::enumerate(op.getAccesses())) {
+  for (GroupMemoryPorts &blockPorts : funcPorts.groups) {
     // Add loads and stores, in program order
-    for (auto &access : cast<mlir::ArrayAttr>(blockAccesses))
-      if (cast<AccessTypeEnumAttr>(access).getValue() == AccessTypeEnum::Load)
-        dataPorts.emplace_back("in" + std::to_string(inputIdx++),
-                               inputs[operandIdx++],
+    for (MemoryPort &port : blockPorts.accessPorts) {
+      if (std::optional<LoadPort> loadPort = dyn_cast<LoadPort>(port)) {
+        portsData.emplace_back("in" + std::to_string(inputIdx++),
+                               inputs[loadPort->getAddrInputIndex()],
                                "l" + std::to_string(ldIdx++) + "a");
-      else {
+      } else {
+        std::optional<StorePort> storePort = dyn_cast<StorePort>(port);
+        assert(storePort && "port must be load or store");
         // Address signal first, then data signal
-        dataPorts.emplace_back("in" + std::to_string(inputIdx++),
-                               inputs[operandIdx++],
+        portsData.emplace_back("in" + std::to_string(inputIdx++),
+                               inputs[storePort->getAddrInputIndex()],
                                "s" + std::to_string(stIdx) + "a");
-        dataPorts.emplace_back("in" + std::to_string(inputIdx++),
-                               inputs[operandIdx++],
+        portsData.emplace_back("in" + std::to_string(inputIdx++),
+                               inputs[storePort->getDataInputIndex()],
                                "s" + std::to_string(stIdx++) + "d");
       }
+    }
+  }
+
+  // Finally, all signals from other interfaces
+  for (MemoryPort &port : funcPorts.interfacePorts) {
+    if (std::optional<LSQLoadStorePort> lsqPort =
+            dyn_cast<LSQLoadStorePort>(port)) {
+      // Load address, then store address, then store data
+      portsData.emplace_back("in" + std::to_string(inputIdx++),
+                             inputs[lsqPort->getLoadAddrInputIndex()],
+                             "l" + std::to_string(ldIdx++) + "a");
+      portsData.emplace_back("in" + std::to_string(inputIdx++),
+                             inputs[lsqPort->getStoreAddrInputIndex()],
+                             "s" + std::to_string(stIdx) + "a");
+      portsData.emplace_back("in" + std::to_string(inputIdx++),
+                             inputs[lsqPort->getStoreDataInputIndex()],
+                             "s" + std::to_string(stIdx++) + "d");
+    } else {
+      std::optional<MCLoadStorePort> mcPort = dyn_cast<MCLoadStorePort>(port);
+      assert(mcPort && "interface port must be lsq or mc");
+      // Load data
+      portsData.emplace_back("in" + std::to_string(inputIdx++),
+                             inputs[mcPort->getLoadDataInputIndex()], "x0d");
+    }
   }
 
   // Add data ports after control ports
-  allPorts.insert(allPorts.end(), dataPorts.begin(), dataPorts.end());
-  return getIOFromPorts(allPorts);
+  return getIOFromPorts(portsData);
 }
 
-/// Produces the "out" attribute value of a handshake::MemoryControllerOp.
-static std::string getOutputForMC(handshake::MemoryControllerOp op) {
-  MemPortsData ports;
-  for (auto [idx, res] : llvm::enumerate(op->getResults().drop_back(1)))
-    ports.emplace_back("out" + std::to_string(idx + 1), res,
-                       "l" + std::to_string(idx) + "d");
-  ports.emplace_back("out" + std::to_string(op.getNumResults()),
-                     op->getResults().back(), "e");
-  return getIOFromPorts(ports);
+/// Produces the "out" attribute value of a memory interface.
+static std::string getOutputForMemInterface(FuncMemoryPorts &funcPorts) {
+  MemPortsData portsData;
+  MemoryOpInterface memOp = funcPorts.memOp;
+  ValueRange results = memOp.getMemResults();
+  unsigned outputIdx = 1, ldIdx = 0;
+
+  // Control signal to end
+  auto addCtrlOutput = [&]() -> void {
+    portsData.emplace_back("out" + std::to_string(outputIdx++),
+                           memOp->getResults().back(), "e");
+  };
+
+  // Load data results, in program order
+  for (GroupMemoryPorts &blockPorts : funcPorts.groups) {
+    for (MemoryPort &port : blockPorts.accessPorts) {
+      if (std::optional<LoadPort> loadPort = dyn_cast<LoadPort>(port)) {
+        portsData.emplace_back("out" + std::to_string(outputIdx++),
+                               results[loadPort->getDataOutputIndex()],
+                               "l" + std::to_string(ldIdx++) + "d");
+      }
+    }
+  }
+
+  // For LSQs, control signal comes before interface outputs (why not?)
+  if (isa<handshake::LSQOp>(memOp))
+    addCtrlOutput();
+
+  // Finally, all signals to other interfaces
+  for (MemoryPort &port : funcPorts.interfacePorts) {
+    if (std::optional<LSQLoadStorePort> lsqPort =
+            dyn_cast<LSQLoadStorePort>(port)) {
+      // Load data
+      portsData.emplace_back("out" + std::to_string(outputIdx++),
+                             results[lsqPort->getLoadDataOutputIndex()],
+                             "l" + std::to_string(ldIdx++) + "d");
+    } else {
+      std::optional<MCLoadStorePort> mcPort = dyn_cast<MCLoadStorePort>(port);
+      assert(mcPort && "interface port must be lsq or mc");
+      // Load address, then store address, then store data
+      portsData.emplace_back("out" + std::to_string(outputIdx++),
+                             results[mcPort->getLoadAddrOutputIndex()], "x0a");
+      portsData.emplace_back("out" + std::to_string(outputIdx++),
+                             results[mcPort->getStoreAddrOutputIndex()], "y0a");
+      portsData.emplace_back("out" + std::to_string(outputIdx++),
+                             results[mcPort->getStoreDataOutputIndex()], "y0d");
+    }
+  }
+
+  // For MCs, control signal comes at the very end
+  if (isa<handshake::MemoryControllerOp>(memOp))
+    addCtrlOutput();
+
+  return getIOFromPorts(portsData);
 }
 
-/// Determines the memory port associated with the address result value of a
-/// memory operation ("portId" attribute).
-static unsigned findMemoryPort(Value addressToMem) {
+/// Finds the memory interface which the provided address channel connects to.
+static handshake::MemoryOpInterface
+getConnectedMemInterface(Value addressToMem) {
   // Find the memory interface that the address goes to (should be the only use)
   auto users = addressToMem.getUsers();
   assert(!users.empty() && "address should have exactly one use");
   if (++users.begin() != users.end())
     assert(false && "address should have exactly one use");
-  auto memOp = dyn_cast<handshake::MemoryControllerOp>(*users.begin());
-  assert(memOp && "address user must be MemoryControllerOp");
+  auto memOp = dyn_cast<handshake::MemoryOpInterface>(*users.begin());
+  assert(memOp && "address user must be memory interface");
+  return memOp;
+}
 
+/// Determines the memory port associated with the address result value of a
+/// memory operation ("portId" attribute).
+static unsigned findMemoryPort(Value addressToMem) {
   // Iterate over memory accesses to find the one that matches the address
   // value
-  size_t inputIdx = 0;
-  auto memInputs = memOp.getInputs();
-  auto accesses = memOp.getAccesses();
-  for (auto [idx, bbAccesses] : llvm::enumerate(accesses)) {
-    if (memOp.bbHasControl(idx))
-      // Skip over the control value
-      inputIdx++;
-
-    for (auto [portIdx, access] :
-         llvm::enumerate(cast<mlir::ArrayAttr>(bbAccesses))) {
-      // Check whether this is our port
-      if (memInputs[inputIdx] == addressToMem)
-        return portIdx;
-
-      // Go to the index corresponding to the next memory operation in the
-      // block
-      if (cast<AccessTypeEnumAttr>(access).getValue() == AccessTypeEnum::Load)
-        inputIdx++;
-      else
-        inputIdx += 2;
+  handshake::MemoryOpInterface memOp = getConnectedMemInterface(addressToMem);
+  ValueRange memInputs = memOp.getMemOperands();
+  FuncMemoryPorts ports = getMemoryPorts(memOp);
+  for (GroupMemoryPorts &groupPorts : ports.groups) {
+    for (auto [portIdx, port] : llvm::enumerate(groupPorts.accessPorts)) {
+      if (std::optional<LoadPort> loadPort = dyn_cast<LoadPort>(port)) {
+        if (memInputs[loadPort->getAddrInputIndex()] == addressToMem)
+          return portIdx;
+      } else {
+        std::optional<StorePort> storePort = dyn_cast<StorePort>(port);
+        assert(storePort && "port must be load or store");
+        if (memInputs[storePort->getAddrInputIndex()] == addressToMem)
+          return portIdx;
+      }
     }
   }
 
-  assert(false && "can't determine memory port");
-  return 0;
+  llvm_unreachable("can't determine memory port");
 }
 
 static size_t findIndexInRange(ValueRange range, Value val) {
   for (auto [idx, res] : llvm::enumerate(range))
     if (res == val)
       return idx;
-  assert(false && "value should exist in range");
-  return 0;
+  llvm_unreachable("value should exist in range");
 }
 
-/// Finds the position (group index and operand index) of a value in the
+/// Finds the position (block index and operand index) of a value in the
 /// inputs of a memory interface.
-static std::pair<size_t, size_t>
-findValueInGroups(SmallVector<SmallVector<Value>> &groups, Value val) {
-  for (auto [groupIdx, bbOperands] : llvm::enumerate(groups))
-    for (auto [opIdx, operand] : llvm::enumerate(bbOperands))
-      if (val == operand)
-        return std::make_pair(groupIdx, opIdx);
-  assert(false && "value should be an operand to the memory interface");
-  return std::make_pair(0, 0);
+static std::pair<size_t, size_t> findValueInGroups(FuncMemoryPorts &ports,
+                                                   Value val) {
+  unsigned numBlocks = ports.getNumGroups();
+  unsigned accInputIdx = 0;
+  for (size_t blockIdx = 0; blockIdx < numBlocks; ++blockIdx) {
+    ValueRange blockInputs = ports.getGroupInputs(blockIdx);
+    accInputIdx += blockInputs.size();
+    for (auto [inputIdx, input] : llvm::enumerate(blockInputs)) {
+      if (input == val)
+        return std::make_pair(blockIdx, inputIdx);
+    }
+  }
+
+  // Value must belong to a port with another memory interface, find the one
+  ValueRange lastInputs = ports.memOp.getMemOperands().drop_front(accInputIdx);
+  for (auto [inputIdx, input] : llvm::enumerate(lastInputs)) {
+    if (input == val)
+      return std::make_pair(ports.getNumGroups(), inputIdx + accInputIdx);
+  }
+
+  llvm_unreachable("value should be an operand to the memory interface");
 }
 
-/// Transforms the port number associated to an edge endpoint to match the
-/// operand ordering of legacy Dynamatic.
-static size_t fixPortNumber(Operation *op, Value val, size_t idx,
-                            bool isSrcOp) {
+/// Corrects for different output port ordering conventions with legacy
+/// Dynamatic.
+static size_t fixOutputPortNumber(Operation *op, size_t idx) {
   return llvm::TypeSwitch<Operation *, size_t>(op)
       .Case<handshake::ConditionalBranchOp>([&](auto) {
-        if (isSrcOp)
+        // Legacy Dynamatic has the data operand before the condition operand
+        return idx;
+      })
+      .Case<handshake::EndOp>([&](handshake::EndOp endOp) {
+        // Legacy Dynamatic has the memory controls before the return values
+        auto numReturnValues = endOp.getReturnValues().size();
+        auto numMemoryControls = endOp.getMemoryControls().size();
+        return (idx < numReturnValues) ? idx + numMemoryControls
+                                       : idx - numReturnValues;
+      })
+      .Case<handshake::LoadOpInterface, handshake::StoreOpInterface>([&](auto) {
+        // Legacy Dynamatic has the data operand/result before the address
+        // operand/result
+        return 1 - idx;
+      })
+      .Case<handshake::LSQOp>([&](handshake::LSQOp lsqOp) {
+        // Legacy Dynamatic places the end control signal before the signals
+        // going to the MC, if one is connected
+        LSQPorts lsqPorts = lsqOp.getPorts();
+        if (!lsqPorts.hasAnyPort<MCLoadStorePort>())
           return idx;
+
+        // End control signal succeeded by laad address, store address, store
+        // data
+        if (idx == lsqOp.getNumResults() - 1)
+          return idx - 3;
+
+        // Signals to MC preceeded by end control signal
+        unsigned numLoads = lsqPorts.getNumPorts<LSQLoadPort>();
+        if (idx >= numLoads)
+          return idx + 1;
+        return idx;
+      })
+      .Default([&](auto) { return idx; });
+}
+
+/// Corrects for different input port ordering conventions with legacy
+/// Dynamatic.
+static size_t fixInputPortNumber(Operation *op, size_t idx) {
+  return llvm::TypeSwitch<Operation *, size_t>(op)
+      .Case<handshake::ConditionalBranchOp>([&](auto) {
         // Legacy Dynamatic has the data operand before the condition operand
         return 1 - idx;
       })
@@ -354,51 +475,54 @@ static size_t fixPortNumber(Operation *op, Value val, size_t idx,
         return (idx < numReturnValues) ? idx + numMemoryControls
                                        : idx - numReturnValues;
       })
-      .Case<handshake::DynamaticLoadOp, handshake::DynamaticStoreOp>([&](auto) {
+      .Case<handshake::LoadOpInterface, handshake::StoreOpInterface>([&](auto) {
         // Legacy Dynamatic has the data operand/result before the address
         // operand/result
         return 1 - idx;
       })
-      .Case<handshake::MemoryControllerOp>(
-          [&](handshake::MemoryControllerOp memOp) {
-            if (isSrcOp)
-              return idx;
+      .Case<handshake::MemoryOpInterface>(
+          [&](handshake::MemoryOpInterface memOp) {
+            Value val = op->getOperand(idx);
 
             // Legacy Dynamatic puts all control operands before all data
             // operands, whereas for us each control operand appears just
-            // before the data inputs of the block it corresponds to
-            auto groups = memOp.groupInputsByBB();
+            // before the data inputs of the group it corresponds to
+            FuncMemoryPorts ports = getMemoryPorts(memOp);
 
             // Determine total number of control operands
-            unsigned ctrlCount = 0;
-            for (size_t i = 0, e = groups.size(); i < e; i++)
-              if (memOp.bbHasControl(i))
-                ctrlCount++;
+            unsigned ctrlCount = ports.getNumPorts<ControlPort>();
 
             // Figure out where the value lies
-            auto [groupIdx, opIdx] = findValueInGroups(groups, val);
+            auto [groupIDx, opIdx] = findValueInGroups(ports, val);
+
+            if (groupIDx == ports.getNumGroups()) {
+              // If the group index is equal to the number of connected groups,
+              // then the operand index points directly to the matching port in
+              // legacy Dynamatic's conventions
+              return opIdx;
+            }
 
             // Figure out at which index the value would be in legacy
             // Dynamatic's interface
-            bool valGroupHasControl = memOp.bbHasControl(groupIdx);
+            bool valGroupHasControl = ports.groups[groupIDx].hasControl();
             if (opIdx == 0 && valGroupHasControl) {
               // Value is a control input
               size_t fixedIdx = 0;
-              for (size_t i = 0; i < groupIdx; i++)
-                if (memOp.bbHasControl(i))
+              for (size_t i = 0; i < groupIDx; i++)
+                if (ports.groups[i].hasControl())
                   fixedIdx++;
               return fixedIdx;
             }
 
             // Value is a data input
             size_t fixedIdx = ctrlCount;
-            for (size_t i = 0; i < groupIdx; i++)
-              // Add number of data inputs corresponding to the block
-              if (memOp.bbHasControl(i))
-                fixedIdx += groups[i].size() - 1;
-              else
-                fixedIdx += groups[i].size();
-
+            for (size_t i = 0; i < groupIDx; i++) {
+              // Add number of data inputs corresponding to the group, minus the
+              // control input which was already accounted for (if present)
+              fixedIdx += ports.groups[i].getNumInputs();
+              if (ports.groups[i].hasControl())
+                --fixedIdx;
+            }
             // Add index offset in the group the value belongs to
             if (valGroupHasControl)
               fixedIdx += opIdx - 1;
@@ -460,9 +584,80 @@ static void patchUpIRForLegacyBuffers(handshake::FuncOp funcOp) {
   }
 }
 
+/// Converts an array of unsigned numbers to a string of the following format:
+/// "{array[0];array[1];...;array[size - 1];0;0;...;0}". The "0"w are generated
+/// dynamically to reach `length` elements based on size of the array; the
+/// latter of which cannot exceed the length.
+static std::string arrayToString(ArrayRef<unsigned> array, unsigned length) {
+  std::stringstream ss;
+  assert(array.size() <= length && "vector too large");
+  ss << "{";
+  if (!array.empty()) {
+    for (unsigned num : array.drop_back())
+      ss << num << ";";
+    ss << array.back();
+    for (size_t i = array.size(); i < length; ++i)
+      ss << ";0";
+  } else {
+    for (size_t i = 0; i < length - 1; ++i)
+      ss << "0;";
+    ss << "0";
+  }
+  ss << "}";
+  return ss.str();
+}
+
+/// Converts a bidimensional array of unsigned numbers to a string of the
+/// following format: "{biArray[0];biArray[1];...;biArray[size - 1]}" where each
+/// `biArray` element is represented using `arrayToString` with the provided
+/// length.
+static std::string biArrayToString(ArrayRef<SmallVector<unsigned>> biArray,
+                                   unsigned length) {
+  std::stringstream ss;
+  ss << "{";
+  if (!biArray.empty()) {
+    for (ArrayRef<unsigned> array : biArray.drop_back())
+      ss << arrayToString(array, length) << ";";
+    ss << arrayToString(biArray.back(), length);
+  }
+  ss << "}";
+  return ss.str();
+}
+
 LogicalResult DOTPrinter::annotateNode(Operation *op,
                                        mlir::raw_indented_ostream &os) {
-  auto info =
+  /// Set common attributes for memory interfaces
+  auto setMemInterfaceAttr = [&](NodeInfo &info, FuncMemoryPorts &ports,
+                                 Value memref) -> void {
+    info.stringAttr["in"] = getInputForMemInterface(ports);
+    info.stringAttr["out"] = getOutputForMemInterface(ports);
+
+    // Set memory name
+    size_t argIdx = cast<BlockArgument>(memref).getArgNumber();
+    info.stringAttr["memory"] =
+        op->getParentOfType<handshake::FuncOp>().getArgName(argIdx).str();
+
+    unsigned lsqLdSt = ports.getNumPorts<LSQLoadStorePort>();
+    info.intAttr["bbcount"] = ports.getNumPorts<ControlPort>();
+    info.intAttr["ldcount"] = ports.getNumPorts<LoadPort>() + lsqLdSt;
+    info.intAttr["stcount"] = ports.getNumPorts<StorePort>() + lsqLdSt;
+  };
+
+  auto setLoadOpAttr = [&](NodeInfo &info,
+                           handshake::LoadOpInterface loadOp) -> void {
+    info.stringAttr["in"] = getInputForLoadOp(loadOp);
+    info.stringAttr["out"] = getOutputForLoadOp(loadOp);
+    info.intAttr["portId"] = findMemoryPort(loadOp.getAddressOutput());
+  };
+
+  auto setStoreOpAttr = [&](NodeInfo &info,
+                            handshake::StoreOpInterface storeOp) -> void {
+    info.stringAttr["in"] = getInputForStoreOp(storeOp);
+    info.stringAttr["out"] = getOutputForStoreOp(storeOp);
+    info.intAttr["portId"] = findMemoryPort(storeOp.getAddressOutput());
+  };
+
+  NodeInfo info =
       llvm::TypeSwitch<Operation *, NodeInfo>(op)
           .Case<handshake::MergeOp>([&](auto) { return NodeInfo("Merge"); })
           .Case<handshake::MuxOp>([&](handshake::MuxOp op) {
@@ -491,48 +686,107 @@ LogicalResult DOTPrinter::annotateNode(Operation *op,
             return info;
           })
           .Case<handshake::MemoryControllerOp>(
-              [&](handshake::MemoryControllerOp memOp) {
+              [&](handshake::MemoryControllerOp mcOp) {
                 auto info = NodeInfo("MC");
-                info.stringAttr["in"] = getInputForMC(memOp);
-                info.stringAttr["out"] = getOutputForMC(memOp);
-
-                // Set memory name
-                Value memref = memOp.getMemref();
-                size_t argIdx = cast<BlockArgument>(memref).getArgNumber();
-                info.stringAttr["memory"] =
-                    op->getParentOfType<handshake::FuncOp>()
-                        .getArgName(argIdx)
-                        .str();
-
-                // Compute the number of basic blocks with a control signal to
-                // the MC
-                unsigned numControls = 0;
-                for (size_t i = 0, e = memOp.getBBCount(); i < e; ++i)
-                  if (memOp.bbHasControl(i))
-                    ++numControls;
-
-                info.intAttr["bbcount"] = numControls;
-                info.intAttr["ldcount"] = memOp.getLdCount();
-                info.intAttr["stcount"] = memOp.getStCount();
+                MCPorts ports = mcOp.getPorts();
+                setMemInterfaceAttr(info, ports, mcOp.getMemRef());
                 return info;
               })
-          .Case<handshake::DynamaticLoadOp>([&](handshake::DynamaticLoadOp op) {
-            auto info = NodeInfo("Operator");
-            info.stringAttr["op"] = "mc_load_op";
-            info.stringAttr["in"] = getInputForLoadOp(op);
-            info.stringAttr["out"] = getOutputForLoadOp(op);
-            info.intAttr["portId"] = findMemoryPort(op.getAddressResult());
+          .Case<handshake::LSQOp>([&](handshake::LSQOp lsqOp) {
+            auto info = NodeInfo("LSQ");
+            LSQPorts ports = lsqOp.getPorts();
+            setMemInterfaceAttr(info, ports, lsqOp.getMemRef());
+            unsigned depth = 16;
+            info.intAttr["fifoDepth"] = depth;
+
+            // Create port information for the LSQ generator
+
+            // Number of load and store ports per block
+            SmallVector<unsigned> numLoads, numStores;
+
+            // Offset and (block-relative) port indices for loads and stores.
+            // Note that the offsets are semantically undimensional vectors (one
+            // logical value per block); however, in legacy DOTs they are stored
+            // as bi-dimensional arrays therefore we use the same data-structure
+            // here
+            SmallVector<SmallVector<unsigned>> loadOffsets, storeOffsets,
+                loadPorts, storePorts;
+
+            unsigned loadIdx = 0, storeIdx = 0;
+            for (GroupMemoryPorts &blockPorts : ports.groups) {
+              // Number of load and store ports per block
+              numLoads.push_back(blockPorts.getNumPorts<LoadPort>());
+              numStores.push_back(blockPorts.getNumPorts<StorePort>());
+
+              // Offsets of first load/store in the block and indices of each
+              // load/store port
+              std::optional<unsigned> firstLoadOffset, firstStoreOffset;
+              SmallVector<unsigned> blockLoadPorts, blockStorePorts;
+              for (auto [portIdx, accessPort] :
+                   llvm::enumerate(blockPorts.accessPorts)) {
+                if (isa<LoadPort>(accessPort)) {
+                  if (!firstLoadOffset)
+                    firstLoadOffset = portIdx;
+                  blockLoadPorts.push_back(loadIdx++);
+                } else {
+                  // This is a StorePort
+                  assert(isa<StorePort>(accessPort) &&
+                         "access port must be load or store");
+                  if (!firstStoreOffset)
+                    firstStoreOffset = portIdx;
+                  blockStorePorts.push_back(storeIdx++);
+                }
+              }
+
+              // If there are no loads or no stores in the block, set the
+              // corresponding offset to 0
+              loadOffsets.push_back(
+                  SmallVector<unsigned>{firstLoadOffset.value_or(0)});
+              storeOffsets.push_back(
+                  SmallVector<unsigned>{firstStoreOffset.value_or(0)});
+
+              loadPorts.push_back(blockLoadPorts);
+              storePorts.push_back(blockStorePorts);
+            }
+
+            // Set LSQ attributes
+            info.stringAttr["numLoads"] =
+                arrayToString(numLoads, numLoads.size());
+            info.stringAttr["numStores"] =
+                arrayToString(numStores, numStores.size());
+            info.stringAttr["loadOffsets"] =
+                biArrayToString(loadOffsets, depth);
+            info.stringAttr["storeOffsets"] =
+                biArrayToString(storeOffsets, depth);
+            info.stringAttr["loadPorts"] = biArrayToString(loadPorts, depth);
+            info.stringAttr["storePorts"] = biArrayToString(storePorts, depth);
+
             return info;
           })
-          .Case<handshake::DynamaticStoreOp>(
-              [&](handshake::DynamaticStoreOp op) {
-                auto info = NodeInfo("Operator");
-                info.stringAttr["op"] = "mc_store_op";
-                info.stringAttr["in"] = getInputForStoreOp(op);
-                info.stringAttr["out"] = getOutputForStoreOp(op);
-                info.intAttr["portId"] = findMemoryPort(op.getAddressResult());
-                return info;
-              })
+          .Case<handshake::MCLoadOp>([&](handshake::MCLoadOp loadOp) {
+            auto info = NodeInfo("Operator");
+            info.stringAttr["op"] = "mc_load_op";
+            setLoadOpAttr(info, loadOp);
+            return info;
+          })
+          .Case<handshake::LSQLoadOp>([&](handshake::LSQLoadOp loadOp) {
+            auto info = NodeInfo("Operator");
+            info.stringAttr["op"] = "lsq_load_op";
+            setLoadOpAttr(info, loadOp);
+            return info;
+          })
+          .Case<handshake::MCStoreOp>([&](handshake::MCStoreOp storeOp) {
+            auto info = NodeInfo("Operator");
+            info.stringAttr["op"] = "mc_store_op";
+            setStoreOpAttr(info, storeOp);
+            return info;
+          })
+          .Case<handshake::LSQStoreOp>([&](handshake::LSQStoreOp storeOp) {
+            auto info = NodeInfo("Operator");
+            info.stringAttr["op"] = "lsq_store_op";
+            setStoreOpAttr(info, storeOp);
+            return info;
+          })
           .Case<handshake::ForkOp>([&](auto) { return NodeInfo("Fork"); })
           .Case<handshake::SourceOp>([&](auto) {
             auto info = NodeInfo("Source");
@@ -696,22 +950,30 @@ LogicalResult DOTPrinter::annotateEdge(Operation *src, Operation *dst,
   }
 
   // Locate value in source results and destination operands
-  auto resIdx = findIndexInRange(src->getResults(), srcVal);
-  auto argIdx = findIndexInRange(dst->getOperands(), val);
+  unsigned resIdx = findIndexInRange(src->getResults(), srcVal);
+  unsigned argIdx = findIndexInRange(dst->getOperands(), val);
 
   // Handle to and from attributes (with special cases). Also add 1 to each
   // index since first ports are called in1/out1
-  info.from = fixPortNumber(src, srcVal, resIdx, true) + 1;
-  info.to = fixPortNumber(dst, val, argIdx, false) + 1;
+  info.from = fixOutputPortNumber(src, resIdx) + 1;
+  info.to = fixInputPortNumber(dst, argIdx) + 1;
 
   // Handle the mem_address optional attribute
-  if (auto srcMem = dyn_cast<handshake::MemoryControllerOp>(src); srcMem) {
-    if (isa<handshake::DynamaticLoadOp, handshake::DynamaticStoreOp>(dst))
+  if (isa<handshake::MemoryOpInterface>(src)) {
+    if (isa<handshake::LoadOpInterface, handshake::StoreOpInterface>(dst)) {
       info.memAddress = false;
-  } else if (auto dstMem = dyn_cast<handshake::MemoryControllerOp>(dst); dstMem)
-    if (isa<handshake::DynamaticLoadOp, handshake::DynamaticStoreOp>(src))
+    } else if (LSQOp lsqOp = dyn_cast<LSQOp>(src);
+               lsqOp && isa<MemoryControllerOp>(dst)) {
+      MCLoadStorePort mcPorts = lsqOp.getPorts().getMCPort();
+      ValueRange lsqOutputs = lsqOp.getMemResults();
+      info.memAddress = lsqOutputs[mcPorts.getLoadAddrOutputIndex()] == val ||
+                        lsqOutputs[mcPorts.getStoreAddrOutputIndex()] == val;
+    }
+  } else if (isa<handshake::MemoryOpInterface>(dst)) {
+    if (isa<handshake::LoadOpInterface, handshake::StoreOpInterface>(src))
       // Is val the address result of the memory operation?
       info.memAddress = val == src->getResult(0);
+  }
 
   info.print(os);
   return success();
@@ -729,7 +991,7 @@ LogicalResult DOTPrinter::annotateArgumentEdge(handshake::FuncOp funcOp,
   // Handle to and from attributes (with special cases). Also add 1 to each
   // index since first ports are called in1/out1
   info.from = 1;
-  info.to = fixPortNumber(dst, arg, argIdx, false) + 1;
+  info.to = fixInputPortNumber(dst, argIdx) + 1;
 
   auto argName = getArgumentName(funcOp, idx);
   info.print(os);
@@ -778,25 +1040,25 @@ static std::string getPrettyPrintedNodeLabel(Operation *op) {
   return llvm::TypeSwitch<Operation *, std::string>(op)
       // handshake operations
       .Case<handshake::ConstantOp>([&](auto op) {
-        // Try to get the constant value as an integer
+        // Try to get the constant value as a boolean
         if (mlir::BoolAttr boolAttr =
-                op->template getAttrOfType<mlir::BoolAttr>("value");
-            boolAttr)
+                op->template getAttrOfType<mlir::BoolAttr>("value"))
           return std::to_string(boolAttr.getValue());
+
         // Try to get the constant value as an integer
         if (mlir::IntegerAttr intAttr =
-                op->template getAttrOfType<mlir::IntegerAttr>("value");
-            intAttr) {
-          if (intAttr.getType().getIntOrFloatBitWidth() == 0)
+                op->template getAttrOfType<mlir::IntegerAttr>("value")) {
+          Type inType = intAttr.getType();
+          if (!isa<IndexType>(inType) && inType.getIntOrFloatBitWidth() == 0)
             return std::string("null");
           APInt ap = intAttr.getValue();
           return ap.isNegative() ? std::to_string(ap.getSExtValue())
                                  : std::to_string(ap.getZExtValue());
         }
+
         // Try to get the constant value as floating point
         if (mlir::FloatAttr floatAttr =
-                op->template getAttrOfType<mlir::FloatAttr>("value");
-            floatAttr)
+                op->template getAttrOfType<mlir::FloatAttr>("value"))
           return std::to_string(floatAttr.getValue().convertToFloat());
 
         // Fallback on a generic string
@@ -810,9 +1072,12 @@ static std::string getPrettyPrintedNodeLabel(Operation *op) {
       })
       .Case<handshake::BranchOp>([&](auto) { return "branch"; })
       // handshake operations (dynamatic)
-      .Case<handshake::DynamaticLoadOp>([&](auto) { return "load"; })
-      .Case<handshake::DynamaticStoreOp>([&](auto) { return "store"; })
+      .Case<handshake::MCLoadOp>([&](auto) { return "mc_load"; })
+      .Case<handshake::MCStoreOp>([&](auto) { return "mc_store"; })
+      .Case<handshake::LSQLoadOp>([&](auto) { return "lsq_load"; })
+      .Case<handshake::LSQStoreOp>([&](auto) { return "lsq_store"; })
       .Case<handshake::MemoryControllerOp>([&](auto) { return "MC"; })
+      .Case<handshake::LSQOp>([&](auto) { return "LSQ"; })
       .Case<handshake::DynamaticReturnOp>([&](auto) { return "return"; })
       // arith operations
       .Case<arith::AddIOp, arith::AddFOp>([&](auto) { return "+"; })
@@ -912,6 +1177,13 @@ LogicalResult DOTPrinter::print(mlir::ModuleOp mod,
         << "we currently only support one handshake function per module";
     return failure();
   }
+
+  // Name all operations in the IR
+  NameAnalysis nameAnalysis = NameAnalysis(mod);
+  if (!nameAnalysis.isAnalysisValid())
+    return failure();
+  nameAnalysis.nameAllUnnamedOps();
+
   handshake::FuncOp funcOp = *funcs.begin();
 
   if (inLegacyMode()) {
@@ -962,7 +1234,7 @@ void DOTPrinter::closeSubgraph(mlir::raw_indented_ostream &os) {
   os << "}\n";
 }
 
-LogicalResult DOTPrinter::printNode(Operation *op, NameUniquer &names,
+LogicalResult DOTPrinter::printNode(Operation *op,
                                     mlir::raw_indented_ostream &os) {
 
   std::string prettyLabel = getPrettyPrintedNodeLabel(op);
@@ -971,7 +1243,12 @@ LogicalResult DOTPrinter::printNode(Operation *op, NameUniquer &names,
       (isa<arith::CmpIOp, arith::CmpFOp>(op) ? prettyLabel : "");
 
   // Print node name
-  StringRef opName = names.getName(*op);
+  std::string opName = getUniqueName(op);
+  if (inLegacyMode()) {
+    // LSQ must be capitalized in legacy modes for dot2vhdl to recognize it
+    if (size_t idx = opName.find("lsq"); idx != std::string::npos)
+      opName = "LSQ" + opName.substr(3);
+  }
   os << "\"" << opName << "\""
      << " [mlir_op=\"" << canonicalName << "\", ";
 
@@ -986,8 +1263,8 @@ LogicalResult DOTPrinter::printNode(Operation *op, NameUniquer &names,
             .Case<handshake::SourceOp, handshake::SinkOp>(
                 [&](auto) { return "gainsboro"; })
             .Case<handshake::ConstantOp>([&](auto) { return "plum"; })
-            .Case<handshake::MemoryControllerOp, handshake::DynamaticLoadOp,
-                  handshake::DynamaticStoreOp>([&](auto) { return "coral"; })
+            .Case<handshake::MemoryOpInterface, handshake::LoadOpInterface,
+                  handshake::StoreOpInterface>([&](auto) { return "coral"; })
             .Case<handshake::MergeOp, handshake::ControlMergeOp,
                   handshake::MuxOp>([&](auto) { return "lightblue"; })
             .Case<handshake::BranchOp, handshake::ConditionalBranchOp>(
@@ -1018,7 +1295,6 @@ LogicalResult DOTPrinter::printNode(Operation *op, NameUniquer &names,
 }
 
 LogicalResult DOTPrinter::printEdge(Operation *src, Operation *dst, Value val,
-                                    NameUniquer &names,
                                     mlir::raw_indented_ostream &os) {
   bool legacyBuffers = mode == Mode::LEGACY_BUFFERS;
   // In legacy-buffers mode, skip edges from branch-like operations to bitwidth
@@ -1029,12 +1305,20 @@ LogicalResult DOTPrinter::printEdge(Operation *src, Operation *dst, Value val,
   // "Jump over" bitwidth modification operations that go to a merge-like
   // operation in a different block
   bool legacy = inLegacyMode();
-  StringRef srcNodeName =
+  std::string srcNodeName =
       legacyBuffers && isBitModBetweenBlocks(src)
-          ? names.getName(*src->getOperand(0).getDefiningOp())
-          : names.getName(*src);
+          ? getUniqueName(src->getOperand(0).getDefiningOp())
+          : getUniqueName(src);
+  std::string dstNodeName = getUniqueName(dst);
+  if (inLegacyMode()) {
+    // LSQ must be capitalized in legacy modes for dot2vhdl to recognize it
+    if (size_t idx = srcNodeName.find("lsq"); idx != std::string::npos)
+      srcNodeName = "LSQ" + srcNodeName.substr(3);
+    if (size_t idx = dstNodeName.find("lsq"); idx != std::string::npos)
+      dstNodeName = "LSQ" + dstNodeName.substr(3);
+  }
 
-  os << "\"" << srcNodeName << "\" -> \"" << names.getName(*dst) << "\" ["
+  os << "\"" << srcNodeName << "\" -> \"" << dstNodeName << "\" ["
      << getStyleOfValue(val);
   if (legacy && failed(annotateEdge(src, dst, val, os)))
     return failure();
@@ -1047,9 +1331,6 @@ LogicalResult DOTPrinter::printEdge(Operation *src, Operation *dst, Value val,
 LogicalResult DOTPrinter::printFunc(handshake::FuncOp funcOp,
                                     mlir::raw_indented_ostream &os) {
   bool legacy = inLegacyMode();
-
-  // Give a unique name to each operation and operand in the function
-  NameUniquer names(funcOp);
 
   std::string splines;
   if (edgeStyle == EdgeStyle::SPLINE)
@@ -1087,7 +1368,7 @@ LogicalResult DOTPrinter::printFunc(handshake::FuncOp funcOp,
       continue;
 
     // Print the operation
-    if (failed(printNode(&op, names, os)))
+    if (failed(printNode(&op, os)))
       return failure();
   }
 
@@ -1104,7 +1385,7 @@ LogicalResult DOTPrinter::printFunc(handshake::FuncOp funcOp,
       if (!isa<MemRefType>(arg.getType()))
         for (Operation *user : arg.getUsers()) {
           auto argLabel = getArgumentName(funcOp, idx);
-          os << "\"" << argLabel << "\" -> \"" << names.getName(*user) << "\" ["
+          os << "\"" << argLabel << "\" -> \"" << getUniqueName(user) << "\" ["
              << getStyleOfValue(arg);
           if (legacy && failed(annotateArgumentEdge(funcOp, idx, user, os)))
             return failure();
@@ -1146,7 +1427,7 @@ LogicalResult DOTPrinter::printFunc(handshake::FuncOp funcOp,
           // the operation using the result
           Operation *useOp = use.getOwner();
           if (isEdgeInSubgraph(useOp, blockID)) {
-            if (failed(printEdge(op, useOp, res, names, os)))
+            if (failed(printEdge(op, useOp, res, os)))
               return failure();
           } else {
             outgoingEdges.emplace_back(op, useOp, res);
@@ -1165,7 +1446,7 @@ LogicalResult DOTPrinter::printFunc(handshake::FuncOp funcOp,
     if (!outgoingEdges.empty())
       os << "// Edges outgoing of basic block " << blockStrID << "\n";
     for (auto &[op, useOp, res] : outgoingEdges)
-      if (failed(printEdge(op, useOp, res, names, os)))
+      if (failed(printEdge(op, useOp, res, os)))
         return failure();
   }
 
@@ -1178,7 +1459,7 @@ LogicalResult DOTPrinter::printFunc(handshake::FuncOp funcOp,
   for (auto *op : handshakeBlocks.outOfBlocks)
     for (auto res : op->getResults())
       for (auto &use : res.getUses())
-        if (failed(printEdge(op, use.getOwner(), res, names, os)))
+        if (failed(printEdge(op, use.getOwner(), res, os)))
           return failure();
 
   os.unindent();

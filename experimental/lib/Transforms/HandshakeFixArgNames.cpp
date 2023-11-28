@@ -31,7 +31,7 @@ struct HandshakeFixArgNamesPass
 
   HandshakeFixArgNamesPass(const std::string &source) { this->source = source; }
 
-  void runOnOperation() override {
+  void runDynamaticPass() override {
     mlir::ModuleOp modOp = getOperation();
 
     // Open the source file
@@ -76,10 +76,8 @@ LogicalResult HandshakeFixArgNamesPass::fixArgNames(handshake::FuncOp funcOp,
     // spaces)
     size_t openIdx = idx + funName.size();
     for (size_t e = srcTxt.size(); openIdx < e; ++openIdx) {
-      if (std::isspace(srcTxt[openIdx])) {
-        openIdx++;
+      if (std::isspace(srcTxt[openIdx]))
         continue;
-      }
       if (srcTxt[openIdx] != '(')
         break;
 
@@ -136,7 +134,7 @@ LogicalResult HandshakeFixArgNamesPass::fixArgNames(handshake::FuncOp funcOp,
   return failure();
 }
 
-std::unique_ptr<mlir::OperationPass<mlir::ModuleOp>>
+std::unique_ptr<dynamatic::DynamaticPass>
 dynamatic::experimental::createHandshakeFixArgNames(const std::string &source) {
   return std::make_unique<HandshakeFixArgNamesPass>(source);
 }

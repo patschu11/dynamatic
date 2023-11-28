@@ -264,7 +264,7 @@ static std::string getExtModuleName(Operation *oldOp) {
             else
               extModName += getTypeName(outTypes[0], loc);
           })
-      .Case<handshake::DynamaticLoadOp, handshake::DynamaticStoreOp>([&](auto) {
+      .Case<handshake::LoadOpInterface, handshake::StoreOpInterface>([&](auto) {
         // data bitwidth
         extModName += getTypeName(inTypes[0], loc);
         // address bitwidth
@@ -302,36 +302,16 @@ static std::string getExtModuleName(Operation *oldOp) {
       })
       .Case<handshake::MemoryControllerOp>(
           [&](handshake::MemoryControllerOp op) {
-            auto [ctrlWidth, addrWidth, dataWidth] = op.getBitwidths();
-            // data bitwidth
-            extModName += std::to_string(dataWidth);
-            // address bitwidth
-            extModName += '_' + std::to_string(addrWidth);
-            std::string temporaryName;
-
-            size_t lc = 0, sc = 0, ctrlCount = 0;
-            for (auto [idx, blockAccesses] :
-                 llvm::enumerate(op.getAccesses())) {
-              temporaryName += "_";
-              bool blockHasStores = false;
-              for (auto &access : cast<mlir::ArrayAttr>(blockAccesses))
-                if (cast<AccessTypeEnumAttr>(access).getValue() ==
-                    AccessTypeEnum::Load) {
-                  temporaryName += "L";
-                  lc++;
-                } else {
-                  temporaryName += "S";
-                  blockHasStores = true;
-                  sc++;
-                }
-              ctrlCount += blockHasStores ? 1 : 0;
-            }
-            // load_count
-            extModName += '_' + std::to_string(lc);
-            // store_count
-            extModName += '_' + std::to_string(sc);
-            // ctrl_count
-            extModName += '_' + std::to_string(ctrlCount);
+            FuncMemoryPorts ports = op.getPorts();
+            // Data bitwidth
+            extModName += std::to_string(ports.dataWidth);
+            // Address bitwidth
+            extModName += '_' + std::to_string(ports.addrWidth);
+            // Port counts
+            extModName += '_' + std::to_string(ports.getNumPorts<LoadPort>()) +
+                          '_' + std::to_string(ports.getNumPorts<StorePort>()) +
+                          '_' +
+                          std::to_string(ports.getNumPorts<ControlPort>());
           })
       .Case<arith::AddFOp, arith::AddIOp, arith::AndIOp, arith::BitcastOp,
             arith::CeilDivSIOp, arith::CeilDivUIOp, arith::DivFOp,
@@ -488,7 +468,7 @@ static ModulePortInfo getMemPortInfo(handshake::MemoryControllerOp memOp,
   }
 
   // Add input ports corresponding to memory interface operands
-  for (auto [idx, arg] : llvm::enumerate(memOp.getInputs()))
+  for (auto [idx, arg] : llvm::enumerate(memOp.getMemInputs()))
     ports.inputs.push_back({StringAttr::get(ctx, memOp.getOperandName(idx + 1)),
                             hw::PortDirection::INPUT, esiWrapper(arg.getType()),
                             inPortIdx++, hw::InnerSymAttr{}});
@@ -781,8 +761,8 @@ SmallVector<hw::InstanceOp> FuncOpConversionPattern::convertMemories(
               e = portIndices.first + FuncModulePortInfo::NUM_MEM_INPUTS;
          i < e; i++)
       operands.push_back(mod.getArgument(i));
-    operands.insert(operands.end(), memOp.getInputs().begin(),
-                    memOp.getInputs().end());
+    operands.insert(operands.end(), memOp.getMemInputs().begin(),
+                    memOp.getMemInputs().end());
     addClkAndRstOperands(operands, mod);
 
     // Create instance of memory interface
@@ -927,7 +907,7 @@ struct UnpackBufferSlots : public OpRewritePattern<handshake::BufferOp> {
 class HandshakeToNetListPass
     : public HandshakeToNetlistBase<HandshakeToNetListPass> {
 public:
-  void runOnOperation() override {
+  void runDynamaticPass() override {
     mlir::ModuleOp mod = getOperation();
     MLIRContext &ctx = getContext();
 
@@ -992,8 +972,10 @@ public:
         ExtModuleConversionPattern<handshake::SinkOp>,
         ExtModuleConversionPattern<handshake::ForkOp>,
         ExtModuleConversionPattern<handshake::DynamaticReturnOp>,
-        ExtModuleConversionPattern<handshake::DynamaticLoadOp>,
-        ExtModuleConversionPattern<handshake::DynamaticStoreOp>,
+        ExtModuleConversionPattern<handshake::MCLoadOp>,
+        ExtModuleConversionPattern<handshake::LSQLoadOp>,
+        ExtModuleConversionPattern<handshake::MCStoreOp>,
+        ExtModuleConversionPattern<handshake::LSQStoreOp>,
         // Arith operations
         ExtModuleConversionPattern<arith::AddFOp>,
         ExtModuleConversionPattern<arith::AddIOp>,
@@ -1066,7 +1048,7 @@ LogicalResult HandshakeToNetListPass::preprocessMod() {
 
 } // end anonymous namespace
 
-std::unique_ptr<mlir::OperationPass<mlir::ModuleOp>>
+std::unique_ptr<dynamatic::DynamaticPass>
 dynamatic::createHandshakeToNetlistPass() {
   return std::make_unique<HandshakeToNetListPass>();
 }

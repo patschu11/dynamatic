@@ -1,9 +1,5 @@
-if (NOT GUROBI_FOUND)
-  add_compile_definitions(DYNAMATIC_GUROBI_NOT_INSTALLED)
-endif()
-
 add_dynamatic_library(DynamaticBufferPlacement
-  BufferingProperties.cpp
+  BufferingSupport.cpp
   BufferPlacementMILP.cpp
   CFDFC.cpp
   FPGA20Buffers.cpp

@@ -15,6 +15,8 @@
 #include "dynamatic/Conversion/AffineToScf.h"
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "dynamatic/Conversion/PassDetails.h"
+#include "dynamatic/Support/Attribute.h"
+#include "dynamatic/Support/DynamaticPass.h"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/Utils.h"
@@ -79,17 +81,6 @@ static Value lowerAffineMapMin(OpBuilder &builder, Location loc, AffineMap map,
     return buildMinMaxReductionSeq(loc, arith::CmpIPredicate::slt, *values,
                                    builder);
   return nullptr;
-}
-
-/// Copies attributes of interest to memref operation that replaces affine
-/// operation.
-static void copyAttributes(Operation *affineOp, Operation *memrefOp) {
-  auto accessName = MemAccessNameAttr::getMnemonic();
-  auto depsName = MemDependenceArrayAttr::getMnemonic();
-  if (auto attr = affineOp->getAttrOfType<MemAccessNameAttr>(accessName))
-    memrefOp->setAttr(accessName, attr);
-  if (auto attr = affineOp->getAttrOfType<MemDependenceArrayAttr>(depsName))
-    memrefOp->setAttr(depsName, attr);
 }
 
 namespace {
@@ -355,7 +346,8 @@ public:
     auto loadOp = rewriter.replaceOpWithNewOp<memref::LoadOp>(
         op, op.getMemRef(), *resultOperands);
 
-    copyAttributes(op, loadOp);
+    copyAttr<handshake::MemDependenceArrayAttr, handshake::MemInterfaceAttr>(
+        op, loadOp);
     return success();
   }
 };
@@ -404,7 +396,8 @@ public:
     auto storeOp = rewriter.replaceOpWithNewOp<memref::StoreOp>(
         op, op.getValueToStore(), op.getMemRef(), *maybeExpandedMap);
 
-    copyAttributes(op, storeOp);
+    copyAttr<handshake::MemDependenceArrayAttr, handshake::MemInterfaceAttr>(
+        op, storeOp);
     return success();
   }
 };
@@ -522,7 +515,7 @@ public:
 
 namespace {
 class AffineToScfPass : public AffineToScfBase<AffineToScfPass> {
-  void runOnOperation() override {
+  void runDynamaticPass() override {
     RewritePatternSet patterns(&getContext());
     patterns.add<AffineApplyLowering, AffineDmaStartLowering,
                  AffineDmaWaitLowering, AffineLoadLowering, AffineMinLowering,
@@ -543,6 +536,6 @@ class AffineToScfPass : public AffineToScfBase<AffineToScfPass> {
 
 /// Lowers If and For operations within a function into their lower level CFG
 /// equivalent blocks.
-std::unique_ptr<Pass> dynamatic::createAffineToScfPass() {
+std::unique_ptr<dynamatic::DynamaticPass> dynamatic::createAffineToScfPass() {
   return std::make_unique<AffineToScfPass>();
 }
