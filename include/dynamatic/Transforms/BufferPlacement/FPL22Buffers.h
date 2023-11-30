@@ -15,7 +15,7 @@
 
 #include "dynamatic/Support/LLVM.h"
 #include "dynamatic/Transforms/BufferPlacement/BufferPlacementMILP.h"
-#include "dynamatic/Transforms/BufferPlacement/BufferingProperties.h"
+#include "dynamatic/Transforms/BufferPlacement/BufferingSupport.h"
 #include "dynamatic/Transforms/BufferPlacement/CFDFC.h"
 #include "llvm/ADT/MapVector.h"
 #include <set>
@@ -29,20 +29,54 @@ namespace fpl22 {
 
 /// Holds MILP variables associated to every CFDFC unit. Note that a unit may
 /// appear in multiple CFDFCs and so may have multiple sets of these variables.
-struct UnitVars {};
+struct UnitVars {
+  /// Fluid retiming of tokens at unit's input (real).
+  GRBVar retIn;
+  /// Fluid retiming of tokens at unit's output. Identical to retiming at unit's
+  /// input if the latter is combinational (real).
+  GRBVar retOut;
+};
 
 /// Holds all MILP variables associated to a channel.
-struct ChannelVars {};
+struct ChannelVars {
+  GRBVar dataPathIn;
+  GRBVar dataPathOut;
+  GRBVar validPathIn;
+  GRBVar validPathOut;
+  GRBVar readyPathIn;
+  GRBVar readyPathOut;
 
-/// Holds all variables associated to a CFDFC. These are a set of variables for
-/// each unit inside the CFDFC, a throughput variable for each channel inside
-/// the CFDFC, and a CFDFC throughput varriable.
-struct CFDFCVars {};
+  GRBVar elasIn;
+  GRBVar elasOut;
+
+  GRBVar throughput;
+
+  GRBVar bufPresent;
+  GRBVar bufNumSlots;
+  GRBVar bufData;
+  GRBVar bufValid;
+  GRBVar bufReady;
+};
+
+/// Holds all variables associated to a CFDFC union. These are a set of
+/// variables for each unit and channel inside the CFDFC union and a CFDFC
+/// throughput variable.
+struct CFDFCVars {
+  /// Maps each of the CFDFC union's unit to its variables.
+  llvm::MapVector<Operation *, UnitVars> units;
+  /// Maps each of the CFDFC union's channels to its variables.
+  llvm::MapVector<Value, ChannelVars> channels;
+  /// CFDFC union's throughput (real).
+  GRBVar throughput;
+};
 
 /// Holds all variables that may be used in the MILP. These are a set of
 /// variables for each CFDFC and a set of variables for each channel in the
 /// function.
-struct MILPVars {};
+struct MILPVars {
+  /// Mapping between each CFDFC union and their related variables.
+  llvm::MapVector<CFDFCUnion *, CFDFCVars> cfUnions;
+};
 
 /// Holds the state and logic for FPL22'20 smart buffer placement. To buffer a
 /// dataflow circuit, this MILP-based algorithm creates:
@@ -87,6 +121,17 @@ protected:
 
   /// Adds all variables used in the MILP to the Gurobi model.
   LogicalResult createVars();
+
+  /// Adds channel-specific buffering constraints that were parsed from IR
+  /// annotations to the Gurobi model.
+  LogicalResult addCustomChannelConstraints(
+      std::vector<std::pair<Value, ChannelVars>> &customChannels);
+
+  LogicalResult addPathConstraints(CFDFCUnion &cfUnion);
+
+  LogicalResult addElasticityConstraints(CFDFCUnion &cfUnion);
+
+  LogicalResult addThroughputConstraints(CFDFCUnion &cfUnion);
 
   /// Logs placement decisisons and achieved throuhgputs after MILP
   /// optimization. Asserts if the logger is nullptr.

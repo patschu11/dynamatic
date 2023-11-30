@@ -33,6 +33,19 @@
 namespace dynamatic {
 namespace buffer {
 
+struct ChannelTimeVars {
+  /// Time at channel's input (i.e., at source unit's output port).
+  GRBVar tIn;
+  /// Time at channel's output (i.e., at destination unit's input port).
+  GRBVar tOut;
+};
+
+struct BufferTimings {
+  double inputPortDelay = 0.0;
+  double internalDelay = 0.0;
+  double outputPortDelay = 0.0;
+};
+
 /// Abstract class holding the basic logic for the smart buffer placement pass,
 /// which expresses the buffer placement problem in dataflow circuits as an MILP
 /// (mixed-integer linear program) whose solution indicates the location and
@@ -123,6 +136,8 @@ protected:
   Logger *logger;
   /// MILP's status, which changes during the object's lifetime.
   MILPStatus status = MILPStatus::FAILED_TO_SETUP;
+
+  LogicalResult addPathConstraints(Value channel, ChannelTimeVars &timeVars);
 
   /// Adds pre-existing buffers that may exist as part of the units the channel
   /// connects to to the buffering properties. These are added to the minimum

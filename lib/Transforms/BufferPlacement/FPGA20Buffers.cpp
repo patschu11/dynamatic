@@ -310,8 +310,10 @@ FPGA20Buffers::addPathConstraints(ValueRange pathChannels,
     GRBVar &opaque = chVars.bufIsOpaque;
 
     // Arrival time at channel's input must be lower than target clock period
-    model.addConstr(t1 + present * (props.inDelay + inBufDelay) <= targetPeriod,
+    double inToBufDelay = props.inDelay + inBufDelay;
+    model.addConstr(t1 + present * inToBufDelay <= targetPeriod,
                     "path_channelInPeriod");
+
     // Arrival time at channel's output must be lower than target clock period
     model.addConstr(t2 <= targetPeriod, "path_channelOutPeriod");
 
