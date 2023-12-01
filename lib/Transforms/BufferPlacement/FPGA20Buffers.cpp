@@ -177,7 +177,7 @@ LogicalResult FPGA20Buffers::createCFDFCVars(CFDFC &cfdfc, unsigned uid) {
     // If the component is combinational (i.e., 0 latency) its output fluid
     // retiming equals its input fluid retiming, otherwise it is different
     double latency;
-    if (failed(timingDB.getLatency(unit, latency)))
+    if (failed(timingDB.getLatency(unit, SignalType::DATA, latency)))
       latency = 0.0;
     if (latency == 0.0)
       unitVar.retOut = unitVar.retIn;
@@ -339,7 +339,7 @@ FPGA20Buffers::addPathConstraints(ValueRange pathChannels,
   // Add path constraints for units
   for (Operation *op : pathUnits) {
     double latency;
-    if (failed(timingDB.getLatency(op, latency)))
+    if (failed(timingDB.getLatency(op, SignalType::DATA, latency)))
       latency = 0.0;
 
     if (latency == 0.0) {
@@ -489,7 +489,8 @@ LogicalResult FPGA20Buffers::addThroughputConstraints(CFDFC &cfdfc) {
   // Add a constraint for each pipelined CFDFC unit
   for (auto &[op, unitVars] : cfdfcVars.units) {
     double latency;
-    if (failed(timingDB.getLatency(op, latency)) || latency == 0.0)
+    if (failed(timingDB.getLatency(op, SignalType::DATA, latency)) ||
+        latency == 0.0)
       continue;
 
     GRBVar &retIn = unitVars.retIn;

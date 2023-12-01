@@ -39,43 +39,40 @@ struct UnitVars {
 
 /// Holds all MILP variables associated to a channel.
 struct ChannelVars {
-  GRBVar dataPathIn;
-  GRBVar dataPathOut;
-  GRBVar validPathIn;
-  GRBVar validPathOut;
-  GRBVar readyPathIn;
-  GRBVar readyPathOut;
+  llvm::SmallMapVector<SignalType, TimeVars, 4> paths;
 
-  GRBVar elasIn;
-  GRBVar elasOut;
+  TimeVars elastic;
 
   GRBVar throughput;
 
   GRBVar bufPresent;
   GRBVar bufNumSlots;
-  GRBVar bufData;
-  GRBVar bufValid;
-  GRBVar bufReady;
+  llvm::SmallMapVector<SignalType, GRBVar, 4> bufTypePresent;
+};
+
+struct BufferPathDelay {
+  GRBVar &present;
+  double delay;
+
+  BufferPathDelay(GRBVar &present, double delay = 0.0)
+      : present(present), delay(delay){};
 };
 
 /// Holds all variables associated to a CFDFC union. These are a set of
 /// variables for each unit and channel inside the CFDFC union and a CFDFC
 /// throughput variable.
-struct CFDFCVars {
-  /// Maps each of the CFDFC union's unit to its variables.
-  llvm::MapVector<Operation *, UnitVars> units;
-  /// Maps each of the CFDFC union's channels to its variables.
-  llvm::MapVector<Value, ChannelVars> channels;
-  /// CFDFC union's throughput (real).
-  GRBVar throughput;
-};
+// struct CFDFCVars {};
 
 /// Holds all variables that may be used in the MILP. These are a set of
 /// variables for each CFDFC and a set of variables for each channel in the
 /// function.
 struct MILPVars {
-  /// Mapping between each CFDFC union and their related variables.
-  llvm::MapVector<CFDFCUnion *, CFDFCVars> cfUnions;
+  /// Maps each of the CFDFC union's unit to its variables.
+  DenseMap<Operation *, UnitVars> units;
+  /// Maps each of the CFDFC union's channels to its variables.
+  DenseMap<Value, ChannelVars> channels;
+  /// CFDFC union's throughputs (real).
+  DenseMap<CFDFCUnion *, GRBVar> throughputs;
 };
 
 /// Holds the state and logic for FPL22'20 smart buffer placement. To buffer a
@@ -104,6 +101,8 @@ public:
   getPlacement(DenseMap<Value, PlacementResult> &placement) override;
 
 protected:
+  using ChannelFilter = const std::function<bool(Value)> &;
+
   /// Contains all variables used throughout the MILP.
   MILPVars vars;
   /// All disjoint sets of CFDFC unions, determined from the individual CFDFCs
@@ -122,16 +121,22 @@ protected:
   /// Adds all variables used in the MILP to the Gurobi model.
   LogicalResult createVars();
 
-  /// Adds channel-specific buffering constraints that were parsed from IR
-  /// annotations to the Gurobi model.
-  LogicalResult addCustomChannelConstraints(
-      std::vector<std::pair<Value, ChannelVars>> &customChannels);
+  LogicalResult addCustomChannelConstraints(CFDFCUnion &cfUnion);
+
+  void addChannelPathConstraints(Value channel, SignalType type,
+                                 const BufferPathDelay &otherBuffer);
+
+  void addUnitPathConstraints(Operation *unit, SignalType type,
+                              ChannelFilter &filter);
 
   LogicalResult addPathConstraints(CFDFCUnion &cfUnion);
 
   LogicalResult addElasticityConstraints(CFDFCUnion &cfUnion);
 
   LogicalResult addThroughputConstraints(CFDFCUnion &cfUnion);
+
+  /// Adds the objective to the Gurobi model.
+  LogicalResult addObjective();
 
   /// Logs placement decisisons and achieved throuhgputs after MILP
   /// optimization. Asserts if the logger is nullptr.
