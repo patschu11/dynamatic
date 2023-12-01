@@ -66,7 +66,7 @@ struct ChannelVars {
 struct CFDFCVars {
   /// Maps each CFDFC unit to its retiming variables.
   llvm::MapVector<Operation *, UnitVars> units;
-  /// Channel throughput variables  (real).
+  /// Channel throughput variables (real).
   llvm::MapVector<Value, GRBVar> channelThroughputs;
   /// CFDFC throughput (real).
   GRBVar throughput;
@@ -166,10 +166,6 @@ protected:
 
   /// Adds the objective to the Gurobi model.
   LogicalResult addObjective();
-
-  /// Returns an estimation of the number of times a token will traverse the
-  /// input channel. The estimation is based on the extracted CFDFCs.
-  unsigned getChannelNumExecs(Value channel);
 
   /// Logs placement decisisons and achieved throuhgputs after MILP
   /// optimization. Asserts if the logger is nullptr.

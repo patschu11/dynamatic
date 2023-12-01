@@ -533,23 +533,6 @@ LogicalResult FPGA20Buffers::addObjective() {
   return success();
 }
 
-unsigned FPGA20Buffers::getChannelNumExecs(Value channel) {
-  Operation *srcOp = channel.getDefiningOp();
-  if (!srcOp)
-    // A channel which originates from a function argument executes only once
-    return 1;
-
-  // Iterate over all CFDFCs which contain the channel to determine its total
-  // number of executions. Backedges are executed one less time than "forward
-  // edges" since they are only taken between executions of the cycle the CFDFC
-  // represents
-  unsigned numExec = isBackedge(channel) ? 0 : 1;
-  for (auto &[cfdfc, _] : funcInfo.cfdfcs)
-    if (cfdfc->channels.contains(channel))
-      numExec += cfdfc->numExecs;
-  return numExec;
-}
-
 void FPGA20Buffers::logResults(DenseMap<Value, PlacementResult> &placement) {
   assert(logger && "no logger was provided");
   mlir::raw_indented_ostream &os = **logger;

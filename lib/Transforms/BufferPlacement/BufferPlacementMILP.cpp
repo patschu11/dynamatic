@@ -87,6 +87,76 @@ BufferPlacementMILP::BufferPlacementMILP(FuncInfo &funcInfo,
   markReadyToOptimize();
 }
 
+LogicalResult
+BufferPlacementMILP::addThroughputConstraints(CFDFC &cfdfc,
+                                              GRBVar &cfThroughput) {
+  // Add a set of constraints for each CFDFC channel
+  for (Value channel : cfdfc.channels) {
+    // Get the ports the channels connect and their retiming MILP variables
+    Operation *srcOp = channel.getDefiningOp();
+    Operation *dstOp = *channel.getUsers().begin();
+    GRBVar &retSrc = vars.units[srcOp].retOut;
+    GRBVar &retDst = vars.units[dstOp].retIn;
+
+    // No throughput constraints on channels going to LSQ stores
+    if (isa<handshake::LSQStoreOp>(dstOp))
+      continue;
+
+    /// TODO: The legacy implementation does not add any constraints here for
+    /// the input channel to select operations that is less frequently
+    /// executed. Temporarily, emulate the same behavior obtained from passing
+    /// our DOTs to the old buffer pass by assuming the "true" input is always
+    /// the least executed one
+    if (arith::SelectOp selOp = dyn_cast<arith::SelectOp>(dstOp))
+      if (channel == selOp.getTrueValue())
+        continue;
+
+    // Retrieve a couple MILP variables associated to the channels
+    ChannelVars &chVars = vars.channels[channel];
+    GRBVar &bufData = chVars.bufTypePresent[SignalType::DATA];
+    GRBVar &bufNumSlots = chVars.bufNumSlots;
+    GRBVar &chThroughput = chVars.throughput;
+    unsigned backedge = cfdfc.backedges.contains(channel) ? 1 : 0;
+
+    // If the channel isn't a backedge, its throughput equals the difference
+    // between the fluid retiming of tokens at its endpoints. Otherwise, it is
+    // one less than this difference
+    model.addConstr(chThroughput - backedge == retDst - retSrc,
+                    "throughput_channelRetiming");
+    // If there is an opaque buffer, the CFDFC throughput cannot exceed the
+    // channel throughput. If there is not, the CFDFC throughput can exceed
+    // the channel thoughput by 1
+    model.addConstr(cfThroughput - chThroughput + bufData <= 1,
+                    "throughput_cfdfc");
+    // If there is an opaque buffer, the summed channel and CFDFC throughputs
+    // cannot exceed the number of buffer slots. If there is not, the combined
+    // throughput can exceed the number of slots by 1
+    model.addConstr(chThroughput + cfThroughput + bufData - bufNumSlots <= 1,
+                    "throughput_combined");
+    // The channel's throughput cannot exceed the number of buffer slots
+    model.addConstr(chThroughput <= bufNumSlots, "throughput_channel");
+  }
+
+  // Add a constraint for each pipelined CFDFC union unit
+  for (Operation *unit : cfdfc.units) {
+    double latency;
+    if (failed(timingDB.getLatency(unit, SignalType::DATA, latency)) ||
+        latency == 0.0)
+      continue;
+
+    // Retrieve the MILP variables corresponding to the unit's fluid retiming
+    UnitVars &unitVars = vars.units[unit];
+    GRBVar &retIn = unitVars.retIn;
+    GRBVar &retOut = unitVars.retOut;
+
+    // The fluid retiming of tokens across the non-combinational unit must
+    // be the same as its latency multiplied by the CFDFC union's throughput
+    model.addConstr(cfThroughput * latency == retOut - retIn,
+                    "through_unitRetiming");
+  }
+  return success();
+}
+
 LogicalResult BufferPlacementMILP::addInternalBuffers(Channel &channel) {
   // Add slots present at the source unit's output ports
   std::string srcName = channel.producer->getName().getStringRef().str();
@@ -130,6 +200,23 @@ void BufferPlacementMILP::deductInternalBuffers(Channel &channel,
          "incorrectly configured");
   result.numTrans -= numTransToDeduct;
   result.numOpaque -= numOpaqueToDeduct;
+}
+
+unsigned BufferPlacementMILP::getChannelNumExecs(Value channel) {
+  Operation *srcOp = channel.getDefiningOp();
+  if (!srcOp)
+    // A channel which originates from a function argument executes only once
+    return 1;
+
+  // Iterate over all CFDFCs which contain the channel to determine its total
+  // number of executions. Backedges are executed one less time than "forward
+  // edges" since they are only taken between executions of the cycle the CFDFC
+  // represents
+  unsigned numExec = isBackedge(channel) ? 0 : 1;
+  for (auto &[cfdfc, _] : funcInfo.cfdfcs)
+    if (cfdfc->channels.contains(channel))
+      numExec += cfdfc->numExecs;
+  return numExec;
 }
 
 void BufferPlacementMILP::forEachIOPair(

@@ -51,10 +51,12 @@ LogicalResult FPL22Buffers::setup() {
   if (failed(createVars()))
     return failure();
 
+  // Add constraints to the MILP
   if (failed(addCustomChannelConstraints()) || failed(addPathConstraints()) ||
       failed(addElasticityConstraints()) || failed(addThroughputConstraints()))
     return failure();
 
+  // Add the MILP objective
   return addObjective();
 }
 
@@ -129,7 +131,10 @@ LogicalResult FPL22Buffers::createVars() {
   }
 
   // Create a variable for the CFDFC's throughput
-  vars.throughput = createVar("throughput");
+  for (auto [idx, cf] : llvm::enumerate(cfUnion.cfdfcs)) {
+    vars.throughputs[cf] =
+        createVar("cfdfc_" + std::to_string(idx) + "_throughput");
+  }
 
   // Update the model before returning so that these variables can be referenced
   // safely during the rest of model creation
@@ -344,7 +349,6 @@ LogicalResult FPL22Buffers::addElasticityConstraints() {
 }
 
 LogicalResult FPL22Buffers::addThroughputConstraints() {
-
   // Add a set of constraints for each CFDFC channel
   for (Value channel : cfUnion.channels) {
     // Get the ports the channels connect and their retiming MILP variables
@@ -412,6 +416,46 @@ LogicalResult FPL22Buffers::addThroughputConstraints() {
   return success();
 }
 
-LogicalResult FPL22Buffers::addObjective() { return success(); }
+LogicalResult FPL22Buffers::addObjective() {
+  // Compute the total number of executions over all channels
+  unsigned totalExecs = 0;
+  for (Value channel : cfUnion.channels)
+    totalExecs += getChannelNumExecs(channel);
+
+  // Create the expression for the MILP objective
+  GRBLinExpr objective;
+
+  // For each CFDFC, add a throughput contribution to the objective, weighted
+  // by the "importance" of the CFDFC
+  double maxCoefCFDFC = 0.0;
+  if (totalExecs != 0) {
+    for (CFDFC *cfdfc : cfUnion.cfdfcs) {
+      if (!funcInfo.cfdfcs[cfdfc])
+        continue;
+      double coef = cfdfc->channels.size() * cfdfc->numExecs /
+                    static_cast<double>(totalExecs);
+      objective += coef * cfdfcVars.throughput;
+      maxCoefCFDFC = std::max(coef, maxCoefCFDFC);
+    }
+  }
+
+  // In case we ran the MILP without providing any CFDFC, set the maximum CFDFC
+  // coefficient to any positive value
+  if (maxCoefCFDFC == 0.0)
+    maxCoefCFDFC = 1.0;
+
+  // For each channel, add a "penalty" in case a buffer is added to the channel,
+  // and another penalty that depends on the number of slots
+  double bufPenaltyMul = 1e-4;
+  double slotPenaltyMul = 1e-5;
+  for (auto &[channel, chVar] : vars.channels) {
+    objective -= maxCoefCFDFC * bufPenaltyMul * chVar.bufPresent;
+    objective -= maxCoefCFDFC * slotPenaltyMul * chVar.bufNumSlots;
+  }
+
+  // Finally, set the MILP objective
+  model.setObjective(objective, GRB_MAXIMIZE);
+  return success();
+}
 
 #endif // DYNAMATIC_GUROBI_NOT_INSTALLED

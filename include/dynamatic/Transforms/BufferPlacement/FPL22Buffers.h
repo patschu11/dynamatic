@@ -70,8 +70,8 @@ struct MILPVars {
   DenseMap<Operation *, UnitVars> units;
   /// Maps each of the CFDFC union's channels to its variables.
   DenseMap<Value, ChannelVars> channels;
-  /// CFDFC union's throughputs (real).
-  GRBVar throughput;
+  /// Throughputs of each CFDFC within the union (real).
+  DenseMap<CFDFC *, GRBVar> throughputs;
 };
 
 /// Holds the state and logic for FPL22'20 smart buffer placement. To buffer a
