@@ -357,6 +357,50 @@ LogicalResult HandshakePlaceBuffersPass::getCFDFCs(FuncInfo &info,
   return success();
 }
 
+/// TODO
+static void logCFDFCUnions(FuncInfo &info, Logger &log,
+                           std::vector<CFDFCUnion> &disjointUnions) {
+  mlir::raw_indented_ostream &os = *log;
+
+  // Map each individual CFDFC to its iteration index
+  std::map<CFDFC *, size_t> cfIndices;
+  for (auto [idx, cfAndOpt] : llvm::enumerate(info.cfdfcs))
+    cfIndices[cfAndOpt.first] = idx;
+
+  os << "# ====================== #\n";
+  os << "# Disjoint CFDFCs Unions #\n";
+  os << "# ====================== #\n\n";
+
+  // For each CFDFC union, display the blocks it encompasses as well as the
+  // individual CFDFCs that fell into it
+  for (auto [idx, cfUnion] : llvm::enumerate(disjointUnions)) {
+
+    // Display the blocks making up the union
+    auto blockIt = cfUnion.blocks.begin(), blockEnd = cfUnion.blocks.end();
+    os << "CFDFC Union #" << idx << ": " << *blockIt;
+    while (++blockIt != blockEnd)
+      os << ", " << *blockIt;
+    os << "\n";
+
+    // Display the block cycle of each CFDFC in the union and some meta
+    // information about the union
+    os.indent();
+    for (CFDFC *cf : cfUnion.cfdfcs) {
+      auto cycleIt = cf->cycle.begin(), cycleEnd = cf->cycle.end();
+      os << "- CFDFC #" << cfIndices[cf] << ": " << *cycleIt;
+      while (++cycleIt != cycleEnd)
+        os << " -> " << *cycleIt;
+      os << "\n";
+    }
+    os << "- Number of block: " << cfUnion.blocks.size() << "\n";
+    os << "- Number of units: " << cfUnion.units.size() << "\n";
+    os << "- Number of channels: " << cfUnion.channels.size() << "\n";
+    os << "- Number of backedges: " << cfUnion.backedges.size() << "\n";
+    os.unindent();
+    os << "\n";
+  }
+}
+
 LogicalResult HandshakePlaceBuffersPass::getBufferPlacement(
     FuncInfo &info, TimingDatabase &timingDB, Logger *logger,
     BufferPlacement &placement) {
@@ -373,6 +417,28 @@ LogicalResult HandshakePlaceBuffersPass::getBufferPlacement(
     return solveMILP<fpga20::FPGA20Buffers>(
         placement, info, timingDB, env, logger, targetCP, algorithm != FPGA20);
   }
+  if (algorithm == FPL22) {
+    // Create disjoint block unions of all CFDFCs
+    SmallVector<CFDFC *, 8> cfdfcs;
+    std::vector<CFDFCUnion> disjointUnions;
+    llvm::transform(info.cfdfcs, std::back_inserter(cfdfcs),
+                    [](auto cfAndOpt) { return cfAndOpt.first; });
+    getDisjointBlockUnions(cfdfcs, disjointUnions);
+    if (logger)
+      logCFDFCUnions(info, *logger, disjointUnions);
+
+    // Create and solve an MILP for each CFDFC union. Placement decisions get
+    // accumulated over all MILPs. It's not possible to override a previous
+    // placement decision because each CFDFC union is disjoint from the others
+    for (CFDFCUnion &cfUnion : disjointUnions) {
+      if (failed(solveMILP<fpl22::FPL22Buffers>(
+              placement, info, timingDB, cfUnion, env, logger, targetCP)))
+        return failure();
+    }
+
+    return success();
+  }
+
   llvm_unreachable("unknown algorithm");
 }
 #endif // DYNAMATIC_GUROBI_NOT_INSTALLED

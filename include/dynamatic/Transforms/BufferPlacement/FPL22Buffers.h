@@ -39,15 +39,14 @@ struct UnitVars {
 
 /// Holds all MILP variables associated to a channel.
 struct ChannelVars {
-  llvm::SmallMapVector<SignalType, TimeVars, 4> paths;
-
+  std::map<SignalType, TimeVars> paths;
   TimeVars elastic;
 
   GRBVar throughput;
 
   GRBVar bufPresent;
   GRBVar bufNumSlots;
-  llvm::SmallMapVector<SignalType, GRBVar, 4> bufTypePresent;
+  std::map<SignalType, GRBVar> bufTypePresent;
 };
 
 struct BufferPathDelay {
@@ -72,7 +71,7 @@ struct MILPVars {
   /// Maps each of the CFDFC union's channels to its variables.
   DenseMap<Value, ChannelVars> channels;
   /// CFDFC union's throughputs (real).
-  DenseMap<CFDFCUnion *, GRBVar> throughputs;
+  GRBVar throughput;
 };
 
 /// Holds the state and logic for FPL22'20 smart buffer placement. To buffer a
@@ -82,35 +81,28 @@ class FPL22Buffers : public BufferPlacementMILP {
 public:
   /// Target clock period.
   const double targetPeriod;
-  /// Maximum clock period.
-  const double maxPeriod;
 
   /// Setups the entire MILP that buffers the input dataflow circuit for the
   /// target clock period, after which (absent errors) it is ready for
-  /// optimization. If a channel's buffering properties are provably
-  /// unsatisfiable, the MILP status will be set to
-  /// `MILPStatus::UNSAT_PROPERTIES` before returning. If something went wrong
-  /// during MILP setup, the MILP status will be set to
-  /// `MILPStatus::FAILED_TO_SETUP`.
-  FPL22Buffers(FuncInfo &funcInfo, const TimingDatabase &timingDB, GRBEnv &env,
-               Logger *log = nullptr, double targetPeriod = 4.0,
-               double maxPeriod = 8.0);
-
-  /// TODO
-  LogicalResult
-  getPlacement(DenseMap<Value, PlacementResult> &placement) override;
+  /// optimization. The `legacyPlacemnt` controls the interpretation of the
+  /// MILP's results (non-legacy placement should yield faster circuits in
+  /// general). If a channel's buffering properties are provably unsatisfiable,
+  /// the MILP will not be marked ready for optimization, ensuring that further
+  /// calls to `optimize` fail.
+  FPL22Buffers(FuncInfo &funcInfo, const TimingDatabase &timingDB,
+               CFDFCUnion &cfUnion, GRBEnv &env, Logger *log = nullptr,
+               double targetPeriod = 4.0);
 
 protected:
   using ChannelFilter = const std::function<bool(Value)> &;
 
   /// Contains all variables used throughout the MILP.
   MILPVars vars;
-  /// All disjoint sets of CFDFC unions, determined from the individual CFDFCs
-  /// extracted from the function. Each CFDFC union is made up of all elements
-  /// (blocks, units, channels, backedges) that are part of at least one of the
-  /// CFDFCs that it was created from. Two CFDFCs end up in the same CFDFC union
-  /// if they span over at least one common basic block.
-  std::vector<CFDFCUnion> disjointUnions;
+  /// TODO
+  CFDFCUnion &cfUnion;
+
+  /// TODO
+  void extractResult(BufferPlacement &result) override;
 
   /// Setups the entire MILP, first creating all variables, then all
   /// constraints, and finally setting the system's objective. Called by the
@@ -121,7 +113,7 @@ protected:
   /// Adds all variables used in the MILP to the Gurobi model.
   LogicalResult createVars();
 
-  LogicalResult addCustomChannelConstraints(CFDFCUnion &cfUnion);
+  LogicalResult addCustomChannelConstraints();
 
   void addChannelPathConstraints(Value channel, SignalType type,
                                  const BufferPathDelay &otherBuffer);
@@ -129,18 +121,14 @@ protected:
   void addUnitPathConstraints(Operation *unit, SignalType type,
                               ChannelFilter &filter);
 
-  LogicalResult addPathConstraints(CFDFCUnion &cfUnion);
+  LogicalResult addPathConstraints();
 
-  LogicalResult addElasticityConstraints(CFDFCUnion &cfUnion);
+  LogicalResult addElasticityConstraints();
 
-  LogicalResult addThroughputConstraints(CFDFCUnion &cfUnion);
+  LogicalResult addThroughputConstraints();
 
   /// Adds the objective to the Gurobi model.
   LogicalResult addObjective();
-
-  /// Logs placement decisisons and achieved throuhgputs after MILP
-  /// optimization. Asserts if the logger is nullptr.
-  void logCFDFCUnions();
 };
 
 } // namespace fpl22

@@ -14,6 +14,7 @@
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "dynamatic/Support/LogicBB.h"
 #include "dynamatic/Support/TimingModels.h"
+#include "dynamatic/Transforms/BufferPlacement/BufferingSupport.h"
 #include "dynamatic/Transforms/BufferPlacement/CFDFC.h"
 #include "dynamatic/Transforms/PassDetails.h"
 #include "gurobi_c.h"
@@ -23,7 +24,6 @@
 #include "mlir/Support/IndentedOstream.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/SetOperations.h"
-#include <type_traits>
 
 #ifndef DYNAMATIC_GUROBI_NOT_INSTALLED
 #include "gurobi_c++.h"
@@ -36,132 +36,100 @@ using namespace dynamatic::buffer;
 using namespace dynamatic::buffer::fpl22;
 
 FPL22Buffers::FPL22Buffers(FuncInfo &funcInfo, const TimingDatabase &timingDB,
-                           GRBEnv &env, Logger *logger, double targetPeriod,
-                           double maxPeriod)
+                           CFDFCUnion &cfUnion, GRBEnv &env, Logger *logger,
+                           double targetPeriod)
     : BufferPlacementMILP(funcInfo, timingDB, env, logger),
-      targetPeriod(targetPeriod), maxPeriod(maxPeriod) {
-  if (status == MILPStatus::UNSAT_PROPERTIES)
-    return;
-
-  // Create disjoint block unions of all CFDFCs
-  SmallVector<CFDFC *, 8> cfdfcs;
-  llvm::transform(funcInfo.cfdfcs, std::back_inserter(cfdfcs),
-                  [](auto cfAndOpt) { return cfAndOpt.first; });
-  getDisjointBlockUnions(cfdfcs, disjointUnions);
-  if (logger)
-    logCFDFCUnions();
-
+      targetPeriod(targetPeriod), cfUnion(cfUnion) {
   if (succeeded(setup()))
-    status = BufferPlacementMILP::MILPStatus::READY;
+    markReadyToOptimize();
 }
 
-LogicalResult
-FPL22Buffers::getPlacement(DenseMap<Value, PlacementResult> &placement) {
-  if (status != MILPStatus::OPTIMIZED) {
-    std::stringstream ss;
-    ss << status;
-    return funcInfo.funcOp->emitError()
-           << "Buffer placements cannot be extracted from MILP (reason: "
-           << ss.str() << ").";
-  }
-
-  return failure();
-}
+void FPL22Buffers::extractResult(BufferPlacement &result) {}
 
 LogicalResult FPL22Buffers::setup() {
   // Create Gurobi variables
   if (failed(createVars()))
     return failure();
 
-  // All constraints are defined per CFDFC union
-  for (CFDFCUnion &cfUnion : disjointUnions) {
-    if (failed(addCustomChannelConstraints(cfUnion)) ||
-        failed(addPathConstraints(cfUnion)) ||
-        failed(addElasticityConstraints(cfUnion)) ||
-        failed(addThroughputConstraints(cfUnion)))
-      return failure();
-  }
+  if (failed(addCustomChannelConstraints()) || failed(addPathConstraints()) ||
+      failed(addElasticityConstraints()) || failed(addThroughputConstraints()))
+    return failure();
 
   return addObjective();
 }
 
 LogicalResult FPL22Buffers::createVars() {
-  // Create a set of variables for each CFDFC union
-  for (auto [uid, cfUnion] : llvm::enumerate(disjointUnions)) {
-    std::string prefix = "union" + std::to_string(uid) + "_";
+  // Create a Gurobi variable of the given name and type for the CFDFC union
+  auto createVar = [&](const std::string &name, char type = GRB_CONTINUOUS) {
+    return model.addVar(0, GRB_INFINITY, 0.0, type, name);
+  };
 
-    // Create a Gurobi variable of the given name and type for the CFDFC union
-    auto createVar = [&](const std::string &name, char type = GRB_CONTINUOUS) {
-      return model.addVar(0, GRB_INFINITY, 0.0, type, name);
+  // Create a set of variables for each channel in the CFDFC union
+  for (Value cfChannel : cfUnion.channels) {
+    // Default-initialize channel variables and retrieve a reference
+    ChannelVars &channelVars = vars.channels[cfChannel];
+    std::string suffix = "_" + getUniqueName(*cfChannel.getUses().begin());
+
+    // Create a Gurobi variable of the given name and type for the channel
+    auto createChannelVar = [&](const std::string &name,
+                                char type = GRB_CONTINUOUS) {
+      return createVar(name + suffix, type);
     };
 
-    // Create a set of variables for each channel in the CFDFC union
-    for (Value cfChannel : cfUnion.channels) {
-      // Default-initialize channel variables and retrieve a reference
-      ChannelVars &channelVars = vars.channels[cfChannel];
-      std::string suffix = "_" + getUniqueName(*cfChannel.getUses().begin());
-
-      // Create a Gurobi variable of the given name and type for the channel
-      auto createChannelVar = [&](const std::string &name,
-                                  char type = GRB_CONTINUOUS) {
-        return createVar(name + suffix, type);
-      };
-
-      // Variables for path constraints
-      TimeVars &dataPath = channelVars.paths[SignalType::DATA];
-      TimeVars &validPath = channelVars.paths[SignalType::VALID];
-      TimeVars &readyPath = channelVars.paths[SignalType::READY];
-      dataPath.tIn = createChannelVar("dataPathIn");
-      dataPath.tOut = createChannelVar("dataPathOut");
-      validPath.tIn = createChannelVar("validPathIn");
-      validPath.tOut = createChannelVar("validPathOut");
-      readyPath.tIn = createChannelVar("readyPathIn");
-      readyPath.tOut = createChannelVar("readyPathOut");
-      // Variables for elasticity constraints
-      channelVars.elastic.tIn = createChannelVar("elasIn");
-      channelVars.elastic.tOut = createChannelVar("elasOut");
-      // Variables for throughput constraints
-      channelVars.throughput = createChannelVar("throuhgput");
-      // Variables for placement information
-      channelVars.bufPresent = createChannelVar("bufPresent", GRB_BINARY);
-      channelVars.bufNumSlots = createChannelVar("bufNumSlots", GRB_INTEGER);
-      GRBVar &bufData = channelVars.bufTypePresent[SignalType::DATA];
-      GRBVar &bufValid = channelVars.bufTypePresent[SignalType::VALID];
-      GRBVar &bufReady = channelVars.bufTypePresent[SignalType::READY];
-      bufData = createChannelVar("bufData", GRB_BINARY);
-      bufValid = createChannelVar("bufValid", GRB_BINARY);
-      bufReady = createChannelVar("bufReady", GRB_BINARY);
-    }
-
-    // Create a set of variables for each unit in the CFDFC union
-    for (Operation *cfUnit : cfUnion.units) {
-      // Default-initialize unit variables and retrieve a reference
-      UnitVars &unitVars = vars.units[cfUnit];
-
-      std::string suffix = "_" + getUniqueName(cfUnit);
-
-      // Create a Gurobi variable of the given name and type for the unit
-      auto createUnitVar = [&](const std::string &name,
-                               char type = GRB_CONTINUOUS) {
-        return createVar(name + suffix, type);
-      };
-
-      unitVars.retIn = createVar("retIn");
-
-      // If the component is combinational (i.e., 0 latency) its output fluid
-      // retiming equals its input fluid retiming, otherwise it is different
-      double latency;
-      if (failed(timingDB.getLatency(cfUnit, SignalType::DATA, latency)))
-        latency = 0.0;
-      if (latency == 0.0)
-        unitVars.retOut = unitVars.retIn;
-      else
-        unitVars.retOut = createUnitVar(prefix + "retOut");
-    }
-
-    // Create a variable for the CFDFC's throughput
-    vars.throughputs[&cfUnion] = createVar(prefix + "throughput");
+    // Variables for path constraints
+    TimeVars &dataPath = channelVars.paths[SignalType::DATA];
+    TimeVars &validPath = channelVars.paths[SignalType::VALID];
+    TimeVars &readyPath = channelVars.paths[SignalType::READY];
+    dataPath.tIn = createChannelVar("dataPathIn");
+    dataPath.tOut = createChannelVar("dataPathOut");
+    validPath.tIn = createChannelVar("validPathIn");
+    validPath.tOut = createChannelVar("validPathOut");
+    readyPath.tIn = createChannelVar("readyPathIn");
+    readyPath.tOut = createChannelVar("readyPathOut");
+    // Variables for elasticity constraints
+    channelVars.elastic.tIn = createChannelVar("elasIn");
+    channelVars.elastic.tOut = createChannelVar("elasOut");
+    // Variables for throughput constraints
+    channelVars.throughput = createChannelVar("throuhgput");
+    // Variables for placement information
+    channelVars.bufPresent = createChannelVar("bufPresent", GRB_BINARY);
+    channelVars.bufNumSlots = createChannelVar("bufNumSlots", GRB_INTEGER);
+    GRBVar &bufData = channelVars.bufTypePresent[SignalType::DATA];
+    GRBVar &bufValid = channelVars.bufTypePresent[SignalType::VALID];
+    GRBVar &bufReady = channelVars.bufTypePresent[SignalType::READY];
+    bufData = createChannelVar("bufData", GRB_BINARY);
+    bufValid = createChannelVar("bufValid", GRB_BINARY);
+    bufReady = createChannelVar("bufReady", GRB_BINARY);
   }
+
+  // Create a set of variables for each unit in the CFDFC union
+  for (Operation *cfUnit : cfUnion.units) {
+    // Default-initialize unit variables and retrieve a reference
+    UnitVars &unitVars = vars.units[cfUnit];
+
+    std::string suffix = "_" + getUniqueName(cfUnit);
+
+    // Create a Gurobi variable of the given name and type for the unit
+    auto createUnitVar = [&](const std::string &name,
+                             char type = GRB_CONTINUOUS) {
+      return createVar(name + suffix, type);
+    };
+
+    unitVars.retIn = createVar("retIn");
+
+    // If the component is combinational (i.e., 0 latency) its output fluid
+    // retiming equals its input fluid retiming, otherwise it is different
+    double latency;
+    if (failed(timingDB.getLatency(cfUnit, SignalType::DATA, latency)))
+      latency = 0.0;
+    if (latency == 0.0)
+      unitVars.retOut = unitVars.retIn;
+    else
+      unitVars.retOut = createUnitVar("retOut");
+  }
+
+  // Create a variable for the CFDFC's throughput
+  vars.throughput = createVar("throughput");
 
   // Update the model before returning so that these variables can be referenced
   // safely during the rest of model creation
@@ -169,7 +137,7 @@ LogicalResult FPL22Buffers::createVars() {
   return success();
 }
 
-LogicalResult FPL22Buffers::addCustomChannelConstraints(CFDFCUnion &cfUnion) {
+LogicalResult FPL22Buffers::addCustomChannelConstraints() {
   for (Value channel : cfUnion.channels) {
     // Get channel-specific buffering properties and channel's variables
     ChannelBufProps &props = channels[channel];
@@ -304,12 +272,12 @@ void FPL22Buffers::addUnitPathConstraints(Operation *unit, SignalType type,
   }
 }
 
-LogicalResult FPL22Buffers::addPathConstraints(CFDFCUnion &cfUnion) {
+LogicalResult FPL22Buffers::addPathConstraints() {
   // Add path constraints for channels in each timing donain
   for (Value channel : cfUnion.channels) {
     ChannelVars &chVars = vars.channels[channel];
-    BufferPathDelay oehb(chVars.bufPresent[SignalType::DATA], 0.1);
-    BufferPathDelay tehb(chVars.bufPresent[SignalType::READY], 0.1);
+    BufferPathDelay oehb(chVars.bufTypePresent[SignalType::DATA], 0.1);
+    BufferPathDelay tehb(chVars.bufTypePresent[SignalType::READY], 0.1);
     addChannelPathConstraints(channel, SignalType::DATA, tehb);
     addChannelPathConstraints(channel, SignalType::VALID, tehb);
     addChannelPathConstraints(channel, SignalType::READY, oehb);
@@ -328,7 +296,7 @@ LogicalResult FPL22Buffers::addPathConstraints(CFDFCUnion &cfUnion) {
   return success();
 }
 
-LogicalResult FPL22Buffers::addElasticityConstraints(CFDFCUnion &cfUnion) {
+LogicalResult FPL22Buffers::addElasticityConstraints() {
   // Upper bound for the longest rigid path
   auto ops = funcInfo.funcOp.getOps();
   unsigned cstCoef = std::distance(ops.begin(), ops.end()) + 2;
@@ -375,9 +343,7 @@ LogicalResult FPL22Buffers::addElasticityConstraints(CFDFCUnion &cfUnion) {
   return success();
 }
 
-LogicalResult FPL22Buffers::addThroughputConstraints(CFDFCUnion &cfUnion) {
-  // CFDFC's throughput
-  GRBVar &throughput = vars.throughputs[&cfUnion];
+LogicalResult FPL22Buffers::addThroughputConstraints() {
 
   // Add a set of constraints for each CFDFC channel
   for (Value channel : cfUnion.channels) {
@@ -415,12 +381,12 @@ LogicalResult FPL22Buffers::addThroughputConstraints(CFDFCUnion &cfUnion) {
     // If there is an opaque buffer, the CFDFC throughput cannot exceed the
     // channel throughput. If there is not, the CFDFC throughput can exceed
     // the channel thoughput by 1
-    model.addConstr(throughput - chThroughput + bufData <= 1,
+    model.addConstr(vars.throughput - chThroughput + bufData <= 1,
                     "throughput_cfdfc");
     // If there is an opaque buffer, the summed channel and CFDFC throughputs
     // cannot exceed the number of buffer slots. If there is not, the combined
     // throughput can exceed the number of slots by 1
-    model.addConstr(chThroughput + throughput + bufData - bufNumSlots <= 1,
+    model.addConstr(chThroughput + vars.throughput + bufData - bufNumSlots <= 1,
                     "throughput_combined");
     // The channel's throughput cannot exceed the number of buffer slots
     model.addConstr(chThroughput <= bufNumSlots, "throughput_channel");
@@ -440,55 +406,12 @@ LogicalResult FPL22Buffers::addThroughputConstraints(CFDFCUnion &cfUnion) {
 
     // The fluid retiming of tokens across the non-combinational unit must
     // be the same as its latency multiplied by the CFDFC union's throughput
-    model.addConstr(throughput * latency == retOut - retIn,
+    model.addConstr(vars.throughput * latency == retOut - retIn,
                     "through_unitRetiming");
   }
   return success();
 }
 
 LogicalResult FPL22Buffers::addObjective() { return success(); }
-
-void FPL22Buffers::logCFDFCUnions() {
-  assert(logger && "no logger was provided");
-  mlir::raw_indented_ostream &os = **logger;
-
-  // Map each individual CFDFC to its iteration index
-  std::map<CFDFC *, size_t> cfIndices;
-  for (auto [idx, cfAndOpt] : llvm::enumerate(funcInfo.cfdfcs))
-    cfIndices[cfAndOpt.first] = idx;
-
-  os << "# ====================== #\n";
-  os << "# Disjoint CFDFCs Unions #\n";
-  os << "# ====================== #\n\n";
-
-  // For each CFDFC union, display the blocks it encompasses as well as the
-  // individual CFDFCs that fell into it
-  for (auto [idx, cfUnion] : llvm::enumerate(disjointUnions)) {
-
-    // Display the blocks making up the union
-    auto blockIt = cfUnion.blocks.begin(), blockEnd = cfUnion.blocks.end();
-    os << "CFDFC Union #" << idx << ": " << *blockIt;
-    while (++blockIt != blockEnd)
-      os << ", " << *blockIt;
-    os << "\n";
-
-    // Display the block cycle of each CFDFC in the union and some meta
-    // information about the union
-    os.indent();
-    for (CFDFC *cf : cfUnion.cfdfcs) {
-      auto cycleIt = cf->cycle.begin(), cycleEnd = cf->cycle.end();
-      os << "- CFDFC #" << cfIndices[cf] << ": " << *cycleIt;
-      while (++cycleIt != cycleEnd)
-        os << " -> " << *cycleIt;
-      os << "\n";
-    }
-    os << "- Number of block: " << cfUnion.blocks.size() << "\n";
-    os << "- Number of units: " << cfUnion.units.size() << "\n";
-    os << "- Number of channels: " << cfUnion.channels.size() << "\n";
-    os << "- Number of backedges: " << cfUnion.backedges.size() << "\n";
-    os.unindent();
-    os << "\n";
-  }
-}
 
 #endif // DYNAMATIC_GUROBI_NOT_INSTALLED
