@@ -39,26 +39,14 @@ using namespace dynamatic::buffer::fpga20;
 
 FPGA20Buffers::FPGA20Buffers(FuncInfo &funcInfo, const TimingDatabase &timingDB,
                              GRBEnv &env, Logger *logger, double targetPeriod,
-                             double maxPeriod, bool legacyPlacement)
+                             bool legacyPlacement)
     : BufferPlacementMILP(funcInfo, timingDB, env, logger),
-      targetPeriod(targetPeriod), maxPeriod(maxPeriod),
-      legacyPlacement(legacyPlacement) {
-  if (status == MILPStatus::UNSAT_PROPERTIES)
-    return;
-  if (succeeded(setup()))
-    status = BufferPlacementMILP::MILPStatus::READY;
+      targetPeriod(targetPeriod), legacyPlacement(legacyPlacement) {
+  if (!unsatisfiable && succeeded(setup()))
+    markReadyToOptimize();
 }
 
-LogicalResult
-FPGA20Buffers::getPlacement(DenseMap<Value, PlacementResult> &placement) {
-  if (status != MILPStatus::OPTIMIZED) {
-    std::stringstream ss;
-    ss << status;
-    return funcInfo.funcOp->emitError()
-           << "Buffer placements cannot be extracted from MILP (reason: "
-           << ss.str() << ").";
-  }
-
+void FPGA20Buffers::extractResult(BufferPlacement &placement) {
   // Iterate over all channels in the circuit
   for (auto &[value, channelVars] : vars.channels) {
     if (channelVars.bufPresent.get(GRB_DoubleAttr_X) == 0)
@@ -102,7 +90,6 @@ FPGA20Buffers::getPlacement(DenseMap<Value, PlacementResult> &placement) {
 
   if (logger)
     logResults(placement);
-  return success();
 }
 
 LogicalResult FPGA20Buffers::setup() {
