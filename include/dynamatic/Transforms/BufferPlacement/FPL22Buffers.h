@@ -27,6 +27,14 @@ namespace dynamatic {
 namespace buffer {
 namespace fpl22 {
 
+struct BufferPathDelay {
+  GRBVar &present;
+  double delay;
+
+  BufferPathDelay(GRBVar &present, double delay = 0.0)
+      : present(present), delay(delay){};
+};
+
 /// Holds MILP variables associated to every CFDFC unit. Note that a unit may
 /// appear in multiple CFDFCs and so may have multiple sets of these variables.
 struct UnitVars {
@@ -42,19 +50,21 @@ struct ChannelVars {
   std::map<SignalType, TimeVars> paths;
   TimeVars elastic;
 
-  GRBVar throughput;
-
   GRBVar bufPresent;
   GRBVar bufNumSlots;
   std::map<SignalType, GRBVar> bufTypePresent;
 };
 
-struct BufferPathDelay {
-  GRBVar &present;
-  double delay;
-
-  BufferPathDelay(GRBVar &present, double delay = 0.0)
-      : present(present), delay(delay){};
+/// Holds all variables associated to a CFDFC. These are a set of variables for
+/// each unit inside the CFDFC, a throughput variable for each channel inside
+/// the CFDFC, and a CFDFC throughput varriable.
+struct CFDFCVars {
+  /// Maps each CFDFC unit to its retiming variables.
+  llvm::MapVector<Operation *, UnitVars> unitVars;
+  /// Channel throughput variables (real).
+  llvm::MapVector<Value, GRBVar> channelThroughputs;
+  /// CFDFC throughput (real).
+  GRBVar throughput;
 };
 
 /// Holds all variables associated to a CFDFC union. These are a set of
@@ -66,12 +76,10 @@ struct BufferPathDelay {
 /// variables for each CFDFC and a set of variables for each channel in the
 /// function.
 struct MILPVars {
-  /// Maps each of the CFDFC union's unit to its variables.
-  DenseMap<Operation *, UnitVars> units;
+  /// Mapping between each CFDFC and their related variables.
+  llvm::MapVector<CFDFC *, CFDFCVars> cfVars;
   /// Maps each of the CFDFC union's channels to its variables.
-  DenseMap<Value, ChannelVars> channels;
-  /// Throughputs of each CFDFC within the union (real).
-  DenseMap<CFDFC *, GRBVar> throughputs;
+  DenseMap<Value, ChannelVars> channelVars;
 };
 
 /// Holds the state and logic for FPL22'20 smart buffer placement. To buffer a

@@ -75,9 +75,6 @@ protected:
   /// Whether the MILP was detected to be unsatisfiable dureing creation.
   bool unsatisfiable;
 
-  /// Adds throughput constraints for the provided CFDFC to the Gurobi model.
-  LogicalResult addThroughputConstraints(CFDFC &cfdfc);
-
   /// Adds pre-existing buffers that may exist as part of the units the channel
   /// connects to to the buffering properties. These are added to the minimum
   /// numbers of transparent and opaque slots so that the MILP is forced to

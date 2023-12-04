@@ -69,7 +69,7 @@ LogicalResult FPL22Buffers::createVars() {
   // Create a set of variables for each channel in the CFDFC union
   for (Value cfChannel : cfUnion.channels) {
     // Default-initialize channel variables and retrieve a reference
-    ChannelVars &channelVars = vars.channels[cfChannel];
+    ChannelVars &channelVars = vars.channelVars[cfChannel];
     std::string suffix = "_" + getUniqueName(*cfChannel.getUses().begin());
 
     // Create a Gurobi variable of the given name and type for the channel
@@ -91,8 +91,6 @@ LogicalResult FPL22Buffers::createVars() {
     // Variables for elasticity constraints
     channelVars.elastic.tIn = createChannelVar("elasIn");
     channelVars.elastic.tOut = createChannelVar("elasOut");
-    // Variables for throughput constraints
-    channelVars.throughput = createChannelVar("throuhgput");
     // Variables for placement information
     channelVars.bufPresent = createChannelVar("bufPresent", GRB_BINARY);
     channelVars.bufNumSlots = createChannelVar("bufNumSlots", GRB_INTEGER);
@@ -105,35 +103,35 @@ LogicalResult FPL22Buffers::createVars() {
   }
 
   // Create a set of variables for each unit in the CFDFC union
-  for (Operation *cfUnit : cfUnion.units) {
-    // Default-initialize unit variables and retrieve a reference
-    UnitVars &unitVars = vars.units[cfUnit];
-
-    std::string suffix = "_" + getUniqueName(cfUnit);
-
-    // Create a Gurobi variable of the given name and type for the unit
-    auto createUnitVar = [&](const std::string &name,
-                             char type = GRB_CONTINUOUS) {
-      return createVar(name + suffix, type);
-    };
-
-    unitVars.retIn = createVar("retIn");
-
-    // If the component is combinational (i.e., 0 latency) its output fluid
-    // retiming equals its input fluid retiming, otherwise it is different
-    double latency;
-    if (failed(timingDB.getLatency(cfUnit, SignalType::DATA, latency)))
-      latency = 0.0;
-    if (latency == 0.0)
-      unitVars.retOut = unitVars.retIn;
-    else
-      unitVars.retOut = createUnitVar("retOut");
-  }
-
-  // Create a variable for the CFDFC's throughput
   for (auto [idx, cf] : llvm::enumerate(cfUnion.cfdfcs)) {
-    vars.throughputs[cf] =
-        createVar("cfdfc_" + std::to_string(idx) + "_throughput");
+    CFDFCVars &cfVars = vars.cfVars[cf];
+    std::string prefix = "cfdfc_" + std::to_string(idx) + "_";
+
+    for (Operation *cfUnit : cf->units) {
+      // Default-initialize unit variables and retrieve a reference
+      UnitVars &unitVars = cfVars.unitVars[cfUnit];
+      std::string suffix = "_" + getUniqueName(cfUnit);
+
+      // Create a Gurobi variable of the given name for the unit
+      auto createUnitVar = [&](const std::string &name) {
+        return createVar(prefix + name + suffix);
+      };
+
+      unitVars.retIn = createVar("retIn");
+
+      // If the component is combinational (i.e., 0 latency) its output fluid
+      // retiming equals its input fluid retiming, otherwise it is different
+      double latency;
+      if (failed(timingDB.getLatency(cfUnit, SignalType::DATA, latency)))
+        latency = 0.0;
+      if (latency == 0.0)
+        unitVars.retOut = unitVars.retIn;
+      else
+        unitVars.retOut = createUnitVar("retOut");
+    }
+
+    // Create a variable for the CFDFC's throughput
+    cfVars.throughput = createVar(prefix + "throughput");
   }
 
   // Update the model before returning so that these variables can be referenced
@@ -146,7 +144,7 @@ LogicalResult FPL22Buffers::addCustomChannelConstraints() {
   for (Value channel : cfUnion.channels) {
     // Get channel-specific buffering properties and channel's variables
     ChannelBufProps &props = channels[channel];
-    ChannelVars &chVars = vars.channels[channel];
+    ChannelVars &chVars = vars.channelVars[channel];
 
     // Force buffer presence if at least one slot is requested
     unsigned minSlots = props.minOpaque + props.minTrans;
@@ -198,7 +196,7 @@ LogicalResult FPL22Buffers::addCustomChannelConstraints() {
 
 void FPL22Buffers::addChannelPathConstraints(
     Value channel, SignalType type, const BufferPathDelay &otherBuffer) {
-  ChannelVars &chVars = vars.channels[channel];
+  ChannelVars &chVars = vars.channelVars[channel];
   GRBVar &tIn = chVars.paths[type].tIn;
   GRBVar &tOut = chVars.paths[type].tOut;
   GRBVar &present = chVars.bufTypePresent[type];
@@ -232,8 +230,8 @@ void FPL22Buffers::addUnitPathConstraints(Operation *unit, SignalType type,
       if (!filter(in) || !filter(out))
         return;
 
-      GRBVar &tInPort = vars.channels[in].paths[type].tOut;
-      GRBVar &tOutPort = vars.channels[out].paths[type].tIn;
+      GRBVar &tInPort = vars.channelVars[in].paths[type].tOut;
+      GRBVar &tOutPort = vars.channelVars[out].paths[type].tIn;
       // Arrival time at unit's output port must be greater than arrival
       // time at unit's input port + the unit's combinational data delay
       model.addConstr(tOutPort >= tInPort + delay, "path_combDelay");
@@ -254,7 +252,7 @@ void FPL22Buffers::addUnitPathConstraints(Operation *unit, SignalType type,
     if (failed(timingDB.getPortDelay(unit, type, PortType::IN, inPortDelay)))
       inPortDelay = 0.0;
 
-    TimeVars &path = vars.channels[in].paths[type];
+    TimeVars &path = vars.channelVars[in].paths[type];
     GRBVar &tInPort = path.tOut;
     // Arrival time at unit's input port + input port delay must be less
     // than the target clock period
@@ -270,7 +268,7 @@ void FPL22Buffers::addUnitPathConstraints(Operation *unit, SignalType type,
     if (failed(timingDB.getPortDelay(unit, type, PortType::OUT, outPortDelay)))
       outPortDelay = 0.0;
 
-    TimeVars &path = vars.channels[out].paths[type];
+    TimeVars &path = vars.channelVars[out].paths[type];
     GRBVar &tOutPort = path.tIn;
     // Arrival time at unit's output port is equal to the output port delay
     model.addConstr(tOutPort == outPortDelay, "path_outDelay");
@@ -280,7 +278,7 @@ void FPL22Buffers::addUnitPathConstraints(Operation *unit, SignalType type,
 LogicalResult FPL22Buffers::addPathConstraints() {
   // Add path constraints for channels in each timing donain
   for (Value channel : cfUnion.channels) {
-    ChannelVars &chVars = vars.channels[channel];
+    ChannelVars &chVars = vars.channelVars[channel];
     BufferPathDelay oehb(chVars.bufTypePresent[SignalType::DATA], 0.1);
     BufferPathDelay tehb(chVars.bufTypePresent[SignalType::READY], 0.1);
     addChannelPathConstraints(channel, SignalType::DATA, tehb);
@@ -308,7 +306,7 @@ LogicalResult FPL22Buffers::addElasticityConstraints() {
 
   // Add elasticity constraints for channels
   for (Value channel : cfUnion.channels) {
-    ChannelVars &chVars = vars.channels[channel];
+    ChannelVars &chVars = vars.channelVars[channel];
     GRBVar &tIn = chVars.elastic.tIn;
     GRBVar &tOut = chVars.elastic.tOut;
     GRBVar &bufPresent = chVars.bufPresent;
@@ -337,8 +335,8 @@ LogicalResult FPL22Buffers::addElasticityConstraints() {
       if (!cfUnion.channels.contains(in) || !cfUnion.channels.contains(out))
         return;
 
-      GRBVar &tInPort = vars.channels[in].elastic.tOut;
-      GRBVar &tOutPort = vars.channels[out].elastic.tIn;
+      GRBVar &tInPort = vars.channelVars[in].elastic.tOut;
+      GRBVar &tOutPort = vars.channelVars[out].elastic.tIn;
       // The elastic arrival time at the output port must be at least one
       // greater than at the input port
       model.addConstr(tOutPort >= 1 + tInPort, "elastic_unitTime");
@@ -349,69 +347,75 @@ LogicalResult FPL22Buffers::addElasticityConstraints() {
 }
 
 LogicalResult FPL22Buffers::addThroughputConstraints() {
-  // Add a set of constraints for each CFDFC channel
-  for (Value channel : cfUnion.channels) {
-    // Get the ports the channels connect and their retiming MILP variables
-    Operation *srcOp = channel.getDefiningOp();
-    Operation *dstOp = *channel.getUsers().begin();
-    GRBVar &retSrc = vars.units[srcOp].retOut;
-    GRBVar &retDst = vars.units[dstOp].retIn;
+  // Add a set of constraints for each CFDFC in the union
+  for (CFDFC *cf : cfUnion.cfdfcs) {
+    CFDFCVars &cfVars = vars.cfVars[cf];
 
-    // No throughput constraints on channels going to LSQ stores
-    if (isa<handshake::LSQStoreOp>(dstOp))
-      continue;
+    // Add a set of constraints for each channel in the CFDFC
+    for (Value channel : cfUnion.channels) {
+      // Get the ports the channels connect and their retiming MILP variables
+      Operation *srcOp = channel.getDefiningOp();
+      Operation *dstOp = *channel.getUsers().begin();
+      GRBVar &retSrc = cfVars.unitVars[srcOp].retOut;
+      GRBVar &retDst = cfVars.unitVars[dstOp].retIn;
 
-    /// TODO: The legacy implementation does not add any constraints here for
-    /// the input channel to select operations that is less frequently
-    /// executed. Temporarily, emulate the same behavior obtained from passing
-    /// our DOTs to the old buffer pass by assuming the "true" input is always
-    /// the least executed one
-    if (arith::SelectOp selOp = dyn_cast<arith::SelectOp>(dstOp))
-      if (channel == selOp.getTrueValue())
+      // No throughput constraints on channels going to LSQ stores
+      if (isa<handshake::LSQStoreOp>(dstOp))
         continue;
 
-    // Retrieve a couple MILP variables associated to the channels
-    ChannelVars &chVars = vars.channels[channel];
-    GRBVar &bufData = chVars.bufTypePresent[SignalType::DATA];
-    GRBVar &bufNumSlots = chVars.bufNumSlots;
-    GRBVar &chThroughput = chVars.throughput;
-    unsigned backedge = cfUnion.backedges.contains(channel) ? 1 : 0;
+      /// TODO: The legacy implementation does not add any constraints here for
+      /// the input channel to select operations that is less frequently
+      /// executed. Temporarily, emulate the same behavior obtained from passing
+      /// our DOTs to the old buffer pass by assuming the "true" input is always
+      /// the least executed one
+      if (arith::SelectOp selOp = dyn_cast<arith::SelectOp>(dstOp))
+        if (channel == selOp.getTrueValue())
+          continue;
 
-    // If the channel isn't a backedge, its throughput equals the difference
-    // between the fluid retiming of tokens at its endpoints. Otherwise, it is
-    // one less than this difference
-    model.addConstr(chThroughput - backedge == retDst - retSrc,
-                    "throughput_channelRetiming");
-    // If there is an opaque buffer, the CFDFC throughput cannot exceed the
-    // channel throughput. If there is not, the CFDFC throughput can exceed
-    // the channel thoughput by 1
-    model.addConstr(vars.throughput - chThroughput + bufData <= 1,
-                    "throughput_cfdfc");
-    // If there is an opaque buffer, the summed channel and CFDFC throughputs
-    // cannot exceed the number of buffer slots. If there is not, the combined
-    // throughput can exceed the number of slots by 1
-    model.addConstr(chThroughput + vars.throughput + bufData - bufNumSlots <= 1,
-                    "throughput_combined");
-    // The channel's throughput cannot exceed the number of buffer slots
-    model.addConstr(chThroughput <= bufNumSlots, "throughput_channel");
-  }
+      // Retrieve a couple MILP variables associated to the channels
+      ChannelVars &chVars = vars.channelVars[channel];
+      GRBVar &bufData = chVars.bufTypePresent[SignalType::DATA];
+      GRBVar &bufNumSlots = chVars.bufNumSlots;
+      GRBVar &chThroughput = cfVars.channelThroughputs[channel];
+      unsigned backedge = cfUnion.backedges.contains(channel) ? 1 : 0;
 
-  // Add a constraint for each pipelined CFDFC union unit
-  for (Operation *unit : cfUnion.units) {
-    double latency;
-    if (failed(timingDB.getLatency(unit, SignalType::DATA, latency)) ||
-        latency == 0.0)
-      continue;
+      // If the channel isn't a backedge, its throughput equals the difference
+      // between the fluid retiming of tokens at its endpoints. Otherwise, it is
+      // one less than this difference
+      model.addConstr(chThroughput - backedge == retDst - retSrc,
+                      "throughput_channelRetiming");
+      // If there is an opaque buffer, the CFDFC throughput cannot exceed the
+      // channel throughput. If there is not, the CFDFC throughput can exceed
+      // the channel thoughput by 1
+      model.addConstr(cfVars.throughput - chThroughput + bufData <= 1,
+                      "throughput_cfdfc");
+      // If there is an opaque buffer, the summed channel and CFDFC throughputs
+      // cannot exceed the number of buffer slots. If there is not, the combined
+      // throughput can exceed the number of slots by 1
+      model.addConstr(
+          chThroughput + cfVars.throughput + bufData - bufNumSlots <= 1,
+          "throughput_combined");
+      // The channel's throughput cannot exceed the number of buffer slots
+      model.addConstr(chThroughput <= bufNumSlots, "throughput_channel");
+    }
 
-    // Retrieve the MILP variables corresponding to the unit's fluid retiming
-    UnitVars &unitVars = vars.units[unit];
-    GRBVar &retIn = unitVars.retIn;
-    GRBVar &retOut = unitVars.retOut;
+    // Add a set of constraints for each pipelined unit in the CFDFC
+    for (Operation *unit : cfUnion.units) {
+      double latency;
+      if (failed(timingDB.getLatency(unit, SignalType::DATA, latency)) ||
+          latency == 0.0)
+        continue;
 
-    // The fluid retiming of tokens across the non-combinational unit must
-    // be the same as its latency multiplied by the CFDFC union's throughput
-    model.addConstr(vars.throughput * latency == retOut - retIn,
-                    "through_unitRetiming");
+      // Retrieve the MILP variables corresponding to the unit's fluid retiming
+      UnitVars &unitVars = cfVars.unitVars[unit];
+      GRBVar &retIn = unitVars.retIn;
+      GRBVar &retOut = unitVars.retOut;
+
+      // The fluid retiming of tokens across the non-combinational unit must
+      // be the same as its latency multiplied by the CFDFC's throughput
+      model.addConstr(cfVars.throughput * latency == retOut - retIn,
+                      "through_unitRetiming");
+    }
   }
   return success();
 }
@@ -429,12 +433,12 @@ LogicalResult FPL22Buffers::addObjective() {
   // by the "importance" of the CFDFC
   double maxCoefCFDFC = 0.0;
   if (totalExecs != 0) {
-    for (CFDFC *cfdfc : cfUnion.cfdfcs) {
-      if (!funcInfo.cfdfcs[cfdfc])
+    for (CFDFC *cf : cfUnion.cfdfcs) {
+      if (!funcInfo.cfdfcs[cf])
         continue;
-      double coef = cfdfc->channels.size() * cfdfc->numExecs /
-                    static_cast<double>(totalExecs);
-      objective += coef * cfdfcVars.throughput;
+      double coef =
+          cf->channels.size() * cf->numExecs / static_cast<double>(totalExecs);
+      objective += coef * vars.cfVars[cf].throughput;
       maxCoefCFDFC = std::max(coef, maxCoefCFDFC);
     }
   }
@@ -448,7 +452,7 @@ LogicalResult FPL22Buffers::addObjective() {
   // and another penalty that depends on the number of slots
   double bufPenaltyMul = 1e-4;
   double slotPenaltyMul = 1e-5;
-  for (auto &[channel, chVar] : vars.channels) {
+  for (auto &[channel, chVar] : vars.channelVars) {
     objective -= maxCoefCFDFC * bufPenaltyMul * chVar.bufPresent;
     objective -= maxCoefCFDFC * slotPenaltyMul * chVar.bufNumSlots;
   }
