@@ -12,6 +12,7 @@
 
 #include "dynamatic/Transforms/BufferPlacement/FPL22Buffers.h"
 #include "circt/Dialect/Handshake/HandshakeOps.h"
+#include "dynamatic/Analysis/NameAnalysis.h"
 #include "dynamatic/Support/LogicBB.h"
 #include "dynamatic/Support/TimingModels.h"
 #include "dynamatic/Transforms/BufferPlacement/BufferingSupport.h"
@@ -24,6 +25,7 @@
 #include "mlir/Support/IndentedOstream.h"
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/SetOperations.h"
+#include "llvm/ADT/TypeSwitch.h"
 
 #ifndef DYNAMATIC_GUROBI_NOT_INSTALLED
 #include "gurobi_c++.h"
@@ -206,7 +208,7 @@ void FPL22Buffers::addChannelPathConstraints(
   model.addConstr(tOut <= targetPeriod, "path_channelOutPeriod");
   model.addConstr(
       tIn - bigCst * present + otherBuffer.delay * otherBuffer.present <= tOut,
-      "path_nobuffer");
+      "path_noBuffer");
   model.addConstr(otherBuffer.delay * otherBuffer.present <= tOut,
                   "path_buffer");
 }
@@ -275,6 +277,65 @@ void FPL22Buffers::addUnitPathConstraints(Operation *unit, SignalType type,
   }
 }
 
+namespace {
+struct ChannelWire {
+  Value channel;
+  SignalType type;
+};
+
+struct MixedDomainConstraint {
+  ChannelWire input;
+  ChannelWire output;
+  double internalDelay;
+};
+
+} // namespace
+
+void FPL22Buffers::addUnitMixedPathConstraints(Operation *unit,
+                                               ChannelFilter &filter) {
+  std::vector<MixedDomainConstraint> constraints;
+  const TimingModel *model = timingDB.getModel(unit);
+
+  llvm::TypeSwitch<Operation *, void>(unit)
+      .Case<handshake::ConditionalBranchOp>(
+          [&](handshake::ConditionalBranchOp condBrOp) {
+
+          })
+      .Case<handshake::ControlMergeOp>([&](handshake::ControlMergeOp ctrlOp) {})
+      .Case<handshake::MergeOp>([&](handshake::MergeOp mergeOp) {})
+      .Case<handshake::MuxOp>([&](handshake::MuxOp muxOp) {})
+      .Case<handshake::EndOp>([&](handshake::EndOp) {})
+      .Case<arith::AddIOp>([&](auto) {});
+
+  std::string unitName = getUniqueName(unit);
+  unsigned idx = 0;
+  for (MixedDomainConstraint &cons : constraints) {
+    // The input/output channels must both be inside the CFDFC union
+    if (!filter(cons.input.channel) || !filter(cons.output.channel))
+      return;
+
+    // Derive variable for arrival time at input pin
+    SignalType inputType = cons.input.type;
+    Value inputChannel = inputType == SignalType::READY ? cons.output.channel
+                                                        : cons.input.channel;
+    TimeVars &inputVars = vars.channelVars[inputChannel].paths[inputType];
+    GRBVar &tPinIn = inputVars.tOut;
+
+    // Derive variable for arrival time at output pin
+    SignalType outputType = cons.input.type;
+    Value outputChannel = outputType == SignalType::READY ? cons.input.channel
+                                                          : cons.output.channel;
+    TimeVars &outputVars = vars.channelVars[outputChannel].paths[outputType];
+    GRBVar &tPinOut = outputVars.tIn;
+
+    // Arrival time at unit's output pin must be greater than arrival time at
+    // unit's input pin plus the unit's internal delay on the path
+    std::string consName =
+        "path_mixed_" + unitName + "_" + std::to_string(idx++);
+    model.addConstr(tPinIn + cons.internalDelay <= tPinOut, consName);
+  }
+}
+
 LogicalResult FPL22Buffers::addPathConstraints() {
   // Add path constraints for channels in each timing donain
   for (Value channel : cfUnion.channels) {
@@ -286,16 +347,20 @@ LogicalResult FPL22Buffers::addPathConstraints() {
     addChannelPathConstraints(channel, SignalType::READY, oehb);
   }
 
+  auto channelFilter = [&](Value channel) -> bool {
+    return cfUnion.channels.contains(channel);
+  };
+
   // Add path constraints for units in each timing donain
   for (Operation *unit : cfUnion.units) {
-    auto channelFilter = [&](Value channel) -> bool {
-      return cfUnion.channels.contains(channel);
-    };
     addUnitPathConstraints(unit, SignalType::DATA, channelFilter);
     addUnitPathConstraints(unit, SignalType::VALID, channelFilter);
     addUnitPathConstraints(unit, SignalType::READY, channelFilter);
   }
 
+  // Add path constraints for units in the mixed domain
+  for (Operation *unit : cfUnion.units)
+    addUnitMixedPathConstraints(unit, channelFilter);
   return success();
 }
 

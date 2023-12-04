@@ -129,6 +129,8 @@ protected:
   void addUnitPathConstraints(Operation *unit, SignalType type,
                               ChannelFilter &filter);
 
+  void addUnitMixedPathConstraints(Operation *unit, ChannelFilter &filter);
+
   LogicalResult addPathConstraints();
 
   LogicalResult addElasticityConstraints();

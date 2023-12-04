@@ -107,7 +107,7 @@ public:
 
   /// Combinational delay from any valid input to a ready output pin.
   double validToReady = 0.0;
-  /// Combinational delay from the condition input pin  to any valid output pin.
+  /// Combinational delay from the condition input pin to any valid output pin.
   double condToValid = 0.0;
   /// Combinational delay from the condition input pin to any ready output pin.
   double condToReady = 0.0;
