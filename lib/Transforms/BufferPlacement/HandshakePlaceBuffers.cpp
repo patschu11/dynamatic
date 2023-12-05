@@ -417,9 +417,8 @@ LogicalResult HandshakePlaceBuffersPass::getBufferPlacement(
 
   if (algorithm == FPGA20 || algorithm == FPGA20_LEGACY) {
     // Create and solve the MILP
-    auto res = solveMILP<fpga20::FPGA20Buffers>(
-        placement, info, timingDB, env, logger, targetCP, algorithm != FPGA20);
-    return res;
+    return solveMILP<fpga20::FPGA20Buffers>(
+        placement, env, info, timingDB, targetCP, algorithm != FPGA20, *logger);
   }
   if (algorithm == FPL22) {
     // Create disjoint block unions of all CFDFCs
@@ -434,9 +433,11 @@ LogicalResult HandshakePlaceBuffersPass::getBufferPlacement(
     // Create and solve an MILP for each CFDFC union. Placement decisions get
     // accumulated over all MILPs. It's not possible to override a previous
     // placement decision because each CFDFC union is disjoint from the others
-    for (CFDFCUnion &cfUnion : disjointUnions) {
-      if (failed(solveMILP<fpl22::FPL22Buffers>(
-              placement, info, timingDB, cfUnion, env, logger, targetCP)))
+    for (auto [idx, cfUnion] : llvm::enumerate(disjointUnions)) {
+      std::string milpName = "cfdfc_placement_" + std::to_string(idx);
+      if (failed(solveMILP<fpl22::FPL22Buffers>(placement, env, info, timingDB,
+                                                targetCP, cfUnion, *logger,
+                                                milpName)))
         return failure();
     }
 

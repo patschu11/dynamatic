@@ -108,9 +108,14 @@ public:
   /// general). If a channel's buffering properties are provably unsatisfiable,
   /// the MILP will not be marked ready for optimization, ensuring that further
   /// calls to `optimize` fail.
-  FPGA20Buffers(FuncInfo &funcInfo, const TimingDatabase &timingDB, GRBEnv &env,
-                Logger *log = nullptr, double targetPeriod = 4.0,
-                bool legacyPlacement = true);
+  FPGA20Buffers(GRBEnv &env, FuncInfo &funcInfo, const TimingDatabase &timingDB,
+                double targetPeriod, bool legacyPlacement);
+
+  /// Achieves the same as the other constructor but additionally logs placement
+  /// decisions and achieved throughputs using the provided logger, and dumps
+  /// the MILP model and solution next to the log file.
+  FPGA20Buffers(GRBEnv &env, FuncInfo &funcInfo, const TimingDatabase &timingDB,
+                double targetPeriod, bool legacyPlacement, Logger &logger);
 
 protected:
   /// Contains all variables used throughout the MILP.

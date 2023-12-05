@@ -38,10 +38,20 @@ using namespace dynamatic;
 using namespace dynamatic::buffer;
 using namespace dynamatic::buffer::fpl22;
 
-FPL22Buffers::FPL22Buffers(FuncInfo &funcInfo, const TimingDatabase &timingDB,
-                           CFDFCUnion &cfUnion, GRBEnv &env, Logger *logger,
-                           double targetPeriod)
-    : BufferPlacementMILP(funcInfo, timingDB, env, logger),
+FPL22Buffers::FPL22Buffers(GRBEnv &env, FuncInfo &funcInfo,
+                           const TimingDatabase &timingDB, double targetPeriod,
+                           CFDFCUnion &cfUnion)
+    : BufferPlacementMILP(env, funcInfo, timingDB), targetPeriod(targetPeriod),
+      cfUnion(cfUnion) {
+  if (succeeded(setup()))
+    markReadyToOptimize();
+}
+
+FPL22Buffers::FPL22Buffers(GRBEnv &env, FuncInfo &funcInfo,
+                           const TimingDatabase &timingDB, double targetPeriod,
+                           CFDFCUnion &cfUnion, Logger &logger,
+                           StringRef milpName)
+    : BufferPlacementMILP(env, funcInfo, timingDB, logger, milpName),
       targetPeriod(targetPeriod), cfUnion(cfUnion) {
   if (succeeded(setup()))
     markReadyToOptimize();

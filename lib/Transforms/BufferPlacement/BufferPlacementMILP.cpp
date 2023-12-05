@@ -39,49 +39,20 @@ using namespace mlir;
 using namespace dynamatic;
 using namespace dynamatic::buffer;
 
-BufferPlacementMILP::BufferPlacementMILP(FuncInfo &funcInfo,
+BufferPlacementMILP::BufferPlacementMILP(GRBEnv &env, FuncInfo &funcInfo,
+                                         const TimingDatabase &timingDB)
+    : MILP<BufferPlacement>(env), timingDB(timingDB), funcInfo(funcInfo),
+      logger(nullptr) {
+  mapChannelsToProperties();
+}
+
+BufferPlacementMILP::BufferPlacementMILP(GRBEnv &env, FuncInfo &funcInfo,
                                          const TimingDatabase &timingDB,
-                                         GRBEnv &env, Logger *logger)
-    : MILP<BufferPlacement>(env, logger), timingDB(timingDB),
-      funcInfo(funcInfo) {
-
-  // Combines any channel-specific buffering properties coming from IR
-  // annotations to internal buffer specifications and stores the combined
-  // properties into the channel map. Fails and marks the MILP unsatisfiable if
-  // any of those combined buffering properties become unsatisfiable.
-  auto deriveBufferingProperties = [&](Channel &channel) -> LogicalResult {
-    // Increase the minimum number of slots if internal buffers are present, and
-    // check for satisfiability
-    if (failed(addInternalBuffers(channel))) {
-      std::stringstream ss;
-      std::string channelName;
-      ss << "Including internal component buffers into buffering "
-            "properties of channel '"
-         << getUniqueName(*channel.value.getUses().begin())
-         << "' made them unsatisfiable. Properties are " << *channel.props;
-      if (logger)
-        **logger << ss.str();
-      return channel.producer->emitError() << ss.str();
-    }
-    channels[channel.value] = *channel.props;
-    return success();
-  };
-
-  // Add channels originating from function arguments to the channel map
-  for (auto [idx, arg] : llvm::enumerate(funcInfo.funcOp.getArguments())) {
-    Channel channel(arg, funcInfo.funcOp, *arg.getUsers().begin());
-    if (failed(deriveBufferingProperties(channel)))
-      return;
-  }
-
-  // Add channels originating from operations' results to the channel map
-  for (Operation &op : funcInfo.funcOp.getOps()) {
-    for (auto [idx, res] : llvm::enumerate(op.getResults())) {
-      Channel channel(res, &op, *res.getUsers().begin());
-      if (failed(deriveBufferingProperties(channel)))
-        return;
-    }
-  }
+                                         Logger &logger, StringRef milpName)
+    : MILP<BufferPlacement>(env, logger.getLogDir() + path::get_separator() +
+                                     milpName),
+      timingDB(timingDB), funcInfo(funcInfo), logger(&logger) {
+  mapChannelsToProperties();
 }
 
 LogicalResult BufferPlacementMILP::addInternalBuffers(Channel &channel) {
@@ -153,6 +124,46 @@ void BufferPlacementMILP::forEachIOPair(
       for (OpResult res : op->getResults())
         if (!isa<MemRefType>(res.getType()))
           callback(opr, res);
+}
+
+void BufferPlacementMILP::mapChannelsToProperties() {
+  // Combines any channel-specific buffering properties coming from IR
+  // annotations to internal buffer specifications and stores the combined
+  // properties into the channel map. Fails and marks the MILP unsatisfiable if
+  // any of those combined buffering properties become unsatisfiable.
+  auto deriveBufferingProperties = [&](Channel &channel) -> LogicalResult {
+    // Increase the minimum number of slots if internal buffers are present, and
+    // check for satisfiability
+    if (failed(addInternalBuffers(channel))) {
+      std::stringstream ss;
+      std::string channelName;
+      ss << "Including internal component buffers into buffering "
+            "properties of channel '"
+         << getUniqueName(*channel.value.getUses().begin())
+         << "' made them unsatisfiable. Properties are " << *channel.props;
+      if (logger)
+        **logger << ss.str();
+      return channel.producer->emitError() << ss.str();
+    }
+    channels[channel.value] = *channel.props;
+    return success();
+  };
+
+  // Add channels originating from function arguments to the channel map
+  for (auto [idx, arg] : llvm::enumerate(funcInfo.funcOp.getArguments())) {
+    Channel channel(arg, funcInfo.funcOp, *arg.getUsers().begin());
+    if (failed(deriveBufferingProperties(channel)))
+      return;
+  }
+
+  // Add channels originating from operations' results to the channel map
+  for (Operation &op : funcInfo.funcOp.getOps()) {
+    for (auto [idx, res] : llvm::enumerate(op.getResults())) {
+      Channel channel(res, &op, *res.getUsers().begin());
+      if (failed(deriveBufferingProperties(channel)))
+        return;
+    }
+  }
 }
 
 #endif // DYNAMATIC_GUROBI_NOT_INSTALLED

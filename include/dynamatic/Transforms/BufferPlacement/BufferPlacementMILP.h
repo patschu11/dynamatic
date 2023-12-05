@@ -54,15 +54,21 @@ public:
   /// create the MILP constraints.
   const TimingDatabase &timingDB;
 
-  /// Initializes the buffer placement MILP for a Handshake function (with its
-  /// CFDFCs) with specific compoennt timing models. The constructor fills the
-  /// `channels` map with a mapping between each of the function's channel and
-  /// their specific buffering properties, adjusting for components' internal
-  /// buffers given by the timing models. If some buffering properties become
-  /// unsatisfiable following this step, the constructor set the `unsatisfiable`
-  /// flag to true.
-  BufferPlacementMILP(FuncInfo &funcInfo, const TimingDatabase &timingDB,
-                      GRBEnv &env, Logger *log = nullptr);
+  /// Starts setting up a the buffer placement MILP for a Handshake function
+  /// (with its CFDFCs) with specific component timing models. The constructor
+  /// maps each of the function's channel to its specific buffering properties,
+  /// adjusting for components' internal buffers given by the timing models. If
+  /// some buffering properties become unsatisfiable following this step, the
+  /// constructor sets the `unsatisfiable` flag to true.
+  BufferPlacementMILP(GRBEnv &env, FuncInfo &funcInfo,
+                      const TimingDatabase &timingDB);
+
+  /// Follows the same pre-processing step as the other constructor; in
+  /// addition, dumps the MILP model and solution under the provided name in the
+  /// logger's directory.
+  BufferPlacementMILP(GRBEnv &env, FuncInfo &funcInfo,
+                      const TimingDatabase &timingDB, Logger &logger,
+                      StringRef milpName);
 
 protected:
   /// Aggregates all data members related to the Handshake function under
@@ -72,7 +78,10 @@ protected:
   /// function to their specific channel buffering properties (unconstraining
   /// properties if none were explicitly specified).
   llvm::MapVector<Value, ChannelBufProps> channels;
-  /// Whether the MILP was detected to be unsatisfiable during creation.
+  /// Logger; if not null the class will log setup and placement information.
+  Logger *logger;
+
+  /// Whether the MILP was detected to be unsatisfiable dureing creation.
   bool unsatisfiable = false;
 
   /// Adds pre-existing buffers that may exist as part of the units the channel
@@ -82,14 +91,14 @@ protected:
   /// them into account in its constraints. Fails when buffering properties
   /// become unsatisfiable due to an increase in the minimum number of slots;
   /// succeeds otherwise.
-  virtual LogicalResult addInternalBuffers(Channel &channel);
+  LogicalResult addInternalBuffers(Channel &channel);
 
   /// Removes pre-existing buffers that may exist as part of the units the
   /// channel connects to from the placement results. These are deducted from
   /// the numbers of transparent and opaque slots stored in the placement
   /// results. The latter are expected to specify more slots than what is going
   /// to be deducted (which should be guaranteed by the MILP constraints).
-  virtual void deductInternalBuffers(Channel &channel, PlacementResult &result);
+  void deductInternalBuffers(Channel &channel, PlacementResult &result);
 
   /// Returns an estimation of the number of times a token will traverse the
   /// input channel. The estimation is based on the extracted CFDFCs.
@@ -97,8 +106,14 @@ protected:
 
   /// Helper method to run a callback function on each input/output port pair of
   /// the provided operation, unless one of the ports has `mlir::MemRefType`.
-  virtual void forEachIOPair(Operation *op,
-                             const std::function<void(Value, Value)> &callback);
+  void forEachIOPair(Operation *op,
+                     const std::function<void(Value, Value)> &callback);
+
+private:
+  /// During object construction, map all the function's channels to their
+  /// specific buffering properties, adjusting for buffers within units as
+  /// described by the timing models.
+  void mapChannelsToProperties();
 };
 
 } // namespace buffer
