@@ -114,7 +114,7 @@ protected:
   CFDFCUnion &cfUnion;
 
   /// TODO
-  void extractResult(BufferPlacement &result) override;
+  void extractResult(BufferPlacement &placement) override;
 
   /// Setups the entire MILP, first creating all variables, then all
   /// constraints, and finally setting the system's objective. Called by the

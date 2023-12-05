@@ -43,7 +43,7 @@ BufferPlacementMILP::BufferPlacementMILP(GRBEnv &env, FuncInfo &funcInfo,
                                          const TimingDatabase &timingDB)
     : MILP<BufferPlacement>(env), timingDB(timingDB), funcInfo(funcInfo),
       logger(nullptr) {
-  mapChannelsToProperties();
+  unsatisfiable = failed(mapChannelsToProperties());
 }
 
 BufferPlacementMILP::BufferPlacementMILP(GRBEnv &env, FuncInfo &funcInfo,
@@ -52,19 +52,17 @@ BufferPlacementMILP::BufferPlacementMILP(GRBEnv &env, FuncInfo &funcInfo,
     : MILP<BufferPlacement>(env, logger.getLogDir() + path::get_separator() +
                                      milpName),
       timingDB(timingDB), funcInfo(funcInfo), logger(&logger) {
-  mapChannelsToProperties();
+  unsatisfiable = failed(mapChannelsToProperties());
 }
 
 LogicalResult BufferPlacementMILP::addInternalBuffers(Channel &channel) {
   // Add slots present at the source unit's output ports
-  std::string srcName = channel.producer->getName().getStringRef().str();
   if (const TimingModel *model = timingDB.getModel(channel.producer)) {
     channel.props->minTrans += model->outputModel.transparentSlots;
     channel.props->minOpaque += model->outputModel.opaqueSlots;
   }
 
   // Add slots present at the destination unit's input ports
-  std::string dstName = channel.consumer->getName().getStringRef().str();
   if (const TimingModel *model = timingDB.getModel(channel.consumer)) {
     channel.props->minTrans += model->inputModel.transparentSlots;
     channel.props->minOpaque += model->inputModel.opaqueSlots;
@@ -73,19 +71,21 @@ LogicalResult BufferPlacementMILP::addInternalBuffers(Channel &channel) {
   return success(channel.props->isSatisfiable());
 }
 
-void BufferPlacementMILP::deductInternalBuffers(Channel &channel,
+void BufferPlacementMILP::deductInternalBuffers(Value channel,
                                                 PlacementResult &result) {
-  std::string srcName = channel.producer->getName().getStringRef().str();
-  std::string dstName = channel.consumer->getName().getStringRef().str();
   unsigned numTransToDeduct = 0, numOpaqueToDeduct = 0;
 
-  // Remove slots present at the source unit's output ports
-  if (const TimingModel *model = timingDB.getModel(channel.producer)) {
-    numTransToDeduct += model->outputModel.transparentSlots;
-    numOpaqueToDeduct += model->outputModel.opaqueSlots;
+  if (isa<OpResult>(channel)) {
+    // Remove slots present at the source unit's output ports
+    if (const TimingModel *model = timingDB.getModel(channel.getDefiningOp())) {
+      numTransToDeduct += model->outputModel.transparentSlots;
+      numOpaqueToDeduct += model->outputModel.opaqueSlots;
+    }
   }
+
   // Remove slots present at the destination unit's input ports
-  if (const TimingModel *model = timingDB.getModel(channel.consumer)) {
+  Operation *consumer = *channel.getUsers().begin();
+  if (const TimingModel *model = timingDB.getModel(consumer)) {
     numTransToDeduct += model->inputModel.transparentSlots;
     numOpaqueToDeduct += model->inputModel.opaqueSlots;
   }
@@ -126,7 +126,7 @@ void BufferPlacementMILP::forEachIOPair(
           callback(opr, res);
 }
 
-void BufferPlacementMILP::mapChannelsToProperties() {
+LogicalResult BufferPlacementMILP::mapChannelsToProperties() {
   // Combines any channel-specific buffering properties coming from IR
   // annotations to internal buffer specifications and stores the combined
   // properties into the channel map. Fails and marks the MILP unsatisfiable if
@@ -134,16 +134,31 @@ void BufferPlacementMILP::mapChannelsToProperties() {
   auto deriveBufferingProperties = [&](Channel &channel) -> LogicalResult {
     // Increase the minimum number of slots if internal buffers are present, and
     // check for satisfiability
+    ChannelBufProps ogProps = *channel.props;
+    if (!ogProps.isSatisfiable()) {
+      std::stringstream ss;
+      std::string channelName;
+      ss << "Channel buffering properties of channel '"
+         << getUniqueName(*channel.value.getUses().begin())
+         << "' are unsatisfiable " << ogProps
+         << "Cannot proceed with buffer placement.";
+      if (logger)
+        **logger << ss.str();
+      return channel.consumer->emitError() << ss.str();
+    }
+
     if (failed(addInternalBuffers(channel))) {
       std::stringstream ss;
       std::string channelName;
       ss << "Including internal component buffers into buffering "
             "properties of channel '"
          << getUniqueName(*channel.value.getUses().begin())
-         << "' made them unsatisfiable. Properties are " << *channel.props;
+         << "' made them unsatisfiable.\nProperties were " << ogProps
+         << "before inclusion and were changed to " << *channel.props
+         << "Cannot proceed with buffer placement.";
       if (logger)
         **logger << ss.str();
-      return channel.producer->emitError() << ss.str();
+      return channel.consumer->emitError() << ss.str();
     }
     channels[channel.value] = *channel.props;
     return success();
@@ -153,7 +168,7 @@ void BufferPlacementMILP::mapChannelsToProperties() {
   for (auto [idx, arg] : llvm::enumerate(funcInfo.funcOp.getArguments())) {
     Channel channel(arg, funcInfo.funcOp, *arg.getUsers().begin());
     if (failed(deriveBufferingProperties(channel)))
-      return;
+      return failure();
   }
 
   // Add channels originating from operations' results to the channel map
@@ -161,9 +176,11 @@ void BufferPlacementMILP::mapChannelsToProperties() {
     for (auto [idx, res] : llvm::enumerate(op.getResults())) {
       Channel channel(res, &op, *res.getUsers().begin());
       if (failed(deriveBufferingProperties(channel)))
-        return;
+        return failure();
     }
   }
+
+  return success();
 }
 
 #endif // DYNAMATIC_GUROBI_NOT_INSTALLED

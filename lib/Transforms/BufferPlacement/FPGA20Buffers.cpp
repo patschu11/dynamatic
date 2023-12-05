@@ -58,7 +58,7 @@ FPGA20Buffers::FPGA20Buffers(GRBEnv &env, FuncInfo &funcInfo,
 
 void FPGA20Buffers::extractResult(BufferPlacement &placement) {
   // Iterate over all channels in the circuit
-  for (auto &[value, channelVars] : vars.channels) {
+  for (auto &[channel, channelVars] : vars.channels) {
     if (channelVars.bufPresent.get(GRB_DoubleAttr_X) == 0)
       continue;
 
@@ -67,7 +67,7 @@ void FPGA20Buffers::extractResult(BufferPlacement &placement) {
     unsigned numSlotsToPlace = static_cast<unsigned>(
         channelVars.bufNumSlots.get(GRB_DoubleAttr_X) + 0.5);
     bool placeOpaque = channelVars.bufIsOpaque.get(GRB_DoubleAttr_X) > 0;
-    ChannelBufProps &props = channels[value];
+    ChannelBufProps &props = channels[channel];
 
     PlacementResult result;
     if (placeOpaque && numSlotsToPlace > 0) {
@@ -93,9 +93,8 @@ void FPGA20Buffers::extractResult(BufferPlacement &placement) {
       result.numTrans = numSlotsToPlace;
     }
 
-    Channel channel(value);
     deductInternalBuffers(channel, result);
-    placement[value] = result;
+    placement[channel] = result;
   }
 
   if (logger)

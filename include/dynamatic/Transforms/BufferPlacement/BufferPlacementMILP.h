@@ -98,7 +98,7 @@ protected:
   /// the numbers of transparent and opaque slots stored in the placement
   /// results. The latter are expected to specify more slots than what is going
   /// to be deducted (which should be guaranteed by the MILP constraints).
-  void deductInternalBuffers(Channel &channel, PlacementResult &result);
+  void deductInternalBuffers(Value channel, PlacementResult &result);
 
   /// Returns an estimation of the number of times a token will traverse the
   /// input channel. The estimation is based on the extracted CFDFCs.
@@ -112,8 +112,9 @@ protected:
 private:
   /// During object construction, map all the function's channels to their
   /// specific buffering properties, adjusting for buffers within units as
-  /// described by the timing models.
-  void mapChannelsToProperties();
+  /// described by the timing models. Fails if the buffering properties of a
+  /// channel are unsatisfiable or become unsatisfiable after adjustment.
+  LogicalResult mapChannelsToProperties();
 };
 
 } // namespace buffer

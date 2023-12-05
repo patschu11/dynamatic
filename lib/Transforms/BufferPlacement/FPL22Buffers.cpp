@@ -57,7 +57,43 @@ FPL22Buffers::FPL22Buffers(GRBEnv &env, FuncInfo &funcInfo,
     markReadyToOptimize();
 }
 
-void FPL22Buffers::extractResult(BufferPlacement &result) {}
+void FPL22Buffers::extractResult(BufferPlacement &placement) {
+  // Iterate over all channels in the circuit
+  for (Value channel : cfUnion.channels) {
+    ChannelVars &chVars = vars.channelVars[channel];
+    // Extract number and type of slots from the MILP solution, as well as
+    // channel-specific buffering properties
+    unsigned numSlotsToPlace =
+        static_cast<unsigned>(chVars.bufNumSlots.get(GRB_DoubleAttr_X) + 0.5);
+    if (numSlotsToPlace == 0)
+      continue;
+
+    bool placeOpaque =
+        chVars.bufTypePresent[SignalType::DATA].get(GRB_DoubleAttr_X) > 0;
+    bool placeTransparent =
+        chVars.bufTypePresent[SignalType::READY].get(GRB_DoubleAttr_X) > 0;
+
+    ChannelBufProps &props = channels[channel];
+    PlacementResult result;
+    if (placeOpaque && placeTransparent) {
+      // Place at least one opaque slot and satisfy the opaque slot requirement,
+      // all other slots are transparent
+      result.numOpaque = std::max(props.minOpaque, 1U);
+      result.numTrans = numSlotsToPlace - result.numOpaque;
+    } else if (placeOpaque) {
+      // Satisfy the transparent slots requirement, all other slots are opaque
+      result.numTrans = props.minTrans;
+      result.numOpaque = numSlotsToPlace - props.minTrans;
+    } else {
+      // All slots transparent
+      assert(placeTransparent && "slots were placed but of no known type");
+      result.numTrans = numSlotsToPlace;
+    }
+
+    deductInternalBuffers(channel, result);
+    placement[channel] = result;
+  }
+}
 
 LogicalResult FPL22Buffers::setup() {
   // Create Gurobi variables
@@ -168,21 +204,27 @@ LogicalResult FPL22Buffers::addCustomChannelConstraints() {
 
     // Force buffer presence if at least one slot is requested
     unsigned minSlots = props.minOpaque + props.minTrans;
-    if (minSlots > 0)
+    if (minSlots > 0) {
       model.addConstr(chVars.bufPresent == 1, "custom_forceBuffers");
+      model.addConstr(chVars.bufNumSlots >= minSlots, "custom_minSlots");
+    }
 
     // Set constraints based on minimum number of buffer slots
     GRBVar &bufData = chVars.bufTypePresent[SignalType::DATA];
+    GRBVar &bufReady = chVars.bufTypePresent[SignalType::READY];
     if (props.minOpaque > 0) {
-      // Force the MILP to use opaque slots
+      // Force the MILP to place at least one opaque slot
       model.addConstr(bufData == 1, "custom_forceData");
-      // If the properties ask for both opaque and transparent slots, let
-      // opaque slots take over. Transparents slots will be placed "manually"
-      // from the total number of slots indicated by the MILP's result.
-      model.addConstr(chVars.bufNumSlots >= minSlots, "custom_minData");
-    } else if (props.minTrans > 0) {
-      // Force the MILP to place a minimum number of transparent slots. If a
-      // data buffer is requested, an extra slot must be given for it
+      // If the MILP decides to also place a ready buffer, then we must reserve
+      // an extra slot for it
+      model.addConstr(chVars.bufNumSlots >= props.minOpaque + bufReady,
+                      "custom_minData");
+    }
+    if (props.minTrans > 0) {
+      // Force the MILP to place at least one transparent slot
+      model.addConstr(bufReady == 1, "custom_forceReady");
+      // If the MILP decides to also place a data buffer, then we must reserve
+      // an extra slot for it
       model.addConstr(chVars.bufNumSlots >= props.minTrans + bufData,
                       "custom_minReady");
     }
@@ -194,9 +236,10 @@ LogicalResult FPL22Buffers::addCustomChannelConstraints() {
         // Forbid buffer placement on the channel entirely
         model.addConstr(chVars.bufPresent == 0, "custom_noBuffer");
         model.addConstr(chVars.bufNumSlots == 0, "custom_noSlot");
+      } else {
+        // Restrict the maximum number of slots allowed
+        model.addConstr(chVars.bufNumSlots <= maxSlots, "custom_maxSlots");
       }
-      // Restrict the maximum number of slots allowed
-      model.addConstr(chVars.bufNumSlots <= maxSlots, "custom_maxSlots");
     }
 
     // Forbid placement of some buffer type based on maximum number of allowed
@@ -206,7 +249,6 @@ LogicalResult FPL22Buffers::addCustomChannelConstraints() {
       model.addConstr(bufData == 0, "custom_noData");
     } else if (props.maxTrans && *props.maxTrans == 0) {
       // Force the MILP to use opaque slots only
-      GRBVar &bufReady = chVars.bufTypePresent[SignalType::READY];
       model.addConstr(bufReady == 0, "custom_noReady");
     }
   }
@@ -475,6 +517,8 @@ LogicalResult FPL22Buffers::addElasticityConstraints() {
     model.addConstr(bufData == bufValid, "elastic_dataValid");
     // If there is at least one slot, there must be a buffer
     model.addConstr(bufPresent >= 0.01 * bufNumSlots, "elastic_present");
+    // If there is a buffer present, it must be either on data or ready
+    model.addConstr(bufData + bufReady >= bufPresent, "elastic_dataReady");
   }
 
   // Add an elasticity constraint for every input/output port pair in the
