@@ -150,9 +150,10 @@ LogicalResult HandshakePlaceBuffersPass::placeUsingMILP() {
   NameAnalysis &nameAnalysis = getAnalysis<NameAnalysis>();
   if (!nameAnalysis.isAnalysisValid())
     return failure();
-  if (!nameAnalysis.areAllOpsNamed())
+  if (!nameAnalysis.areAllOpsNamed()) {
     if (failed(nameAnalysis.walk(NameAnalysis::UnnamedBehavior::NAME)))
       return failure();
+  }
   markAnalysesPreserved<NameAnalysis>();
 
   mlir::ModuleOp modOp = getOperation();
@@ -167,9 +168,10 @@ LogicalResult HandshakePlaceBuffersPass::placeUsingMILP() {
     // pairs of basic blocks) from disk. While the rest of this pass works if
     // the module contains multiple functions, this only makes sense if the
     // module has a single function
-    if (failed(StdProfiler::readCSV(frequencies, info.archs)))
+    if (failed(StdProfiler::readCSV(frequencies, info.archs))) {
       return funcOp->emitError()
              << "Failed to read profiling information from CSV";
+    }
 
     if (failed(checkFuncInvariants(info)))
       return failure();
@@ -181,9 +183,10 @@ LogicalResult HandshakePlaceBuffersPass::placeUsingMILP() {
     return failure();
 
   // Place buffers in each function
-  for (handshake::FuncOp funcOp : modOp.getOps<handshake::FuncOp>())
+  for (handshake::FuncOp funcOp : modOp.getOps<handshake::FuncOp>()) {
     if (failed(placeBuffers(funcToInfo[funcOp], timingDB)))
       return failure();
+  }
   return success();
 }
 
@@ -414,8 +417,9 @@ LogicalResult HandshakePlaceBuffersPass::getBufferPlacement(
 
   if (algorithm == FPGA20 || algorithm == FPGA20_LEGACY) {
     // Create and solve the MILP
-    return solveMILP<fpga20::FPGA20Buffers>(
+    auto res = solveMILP<fpga20::FPGA20Buffers>(
         placement, info, timingDB, env, logger, targetCP, algorithm != FPGA20);
+    return res;
   }
   if (algorithm == FPL22) {
     // Create disjoint block unions of all CFDFCs

@@ -53,7 +53,6 @@ BufferPlacementMILP::BufferPlacementMILP(FuncInfo &funcInfo,
     // Increase the minimum number of slots if internal buffers are present, and
     // check for satisfiability
     if (failed(addInternalBuffers(channel))) {
-      unsatisfiable = true;
       std::stringstream ss;
       std::string channelName;
       ss << "Including internal component buffers into buffering "
@@ -83,8 +82,6 @@ BufferPlacementMILP::BufferPlacementMILP(FuncInfo &funcInfo,
         return;
     }
   }
-
-  markReadyToOptimize();
 }
 
 LogicalResult BufferPlacementMILP::addInternalBuffers(Channel &channel) {

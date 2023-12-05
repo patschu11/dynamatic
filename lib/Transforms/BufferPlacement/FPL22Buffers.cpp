@@ -26,6 +26,7 @@
 #include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/SetOperations.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include <optional>
 
 #ifndef DYNAMATIC_GUROBI_NOT_INSTALLED
 #include "gurobi_c++.h"
@@ -104,27 +105,34 @@ LogicalResult FPL22Buffers::createVars() {
     bufReady = createChannelVar("bufReady", GRB_BINARY);
   }
 
-  // Create a set of variables for each unit in the CFDFC union
+  // Create a set of variables for each CFDFC
   for (auto [idx, cf] : llvm::enumerate(cfUnion.cfdfcs)) {
     CFDFCVars &cfVars = vars.cfVars[cf];
     std::string prefix = "cfdfc_" + std::to_string(idx) + "_";
 
-    for (Operation *cfUnit : cf->units) {
-      // Default-initialize unit variables and retrieve a reference
-      UnitVars &unitVars = cfVars.unitVars[cfUnit];
-      std::string suffix = "_" + getUniqueName(cfUnit);
+    // Create a variable to represent the throughput of each CFDFC channel
+    for (Value channel : cf->channels) {
+      cfVars.channelThroughputs[channel] = createVar(
+          prefix + "throughput_" + getUniqueName(*channel.getUses().begin()));
+    }
+
+    // Create a set of variables for each unit in the CFDFC
+    for (Operation *unit : cf->units) {
+      std::string suffix = "_" + getUniqueName(unit);
 
       // Create a Gurobi variable of the given name for the unit
       auto createUnitVar = [&](const std::string &name) {
         return createVar(prefix + name + suffix);
       };
 
-      unitVars.retIn = createVar("retIn");
+      // Default-initialize unit variables and retrieve a reference
+      UnitVars &unitVars = cfVars.unitVars[unit];
+      unitVars.retIn = createUnitVar("retIn");
 
       // If the component is combinational (i.e., 0 latency) its output fluid
       // retiming equals its input fluid retiming, otherwise it is different
       double latency;
-      if (failed(timingDB.getLatency(cfUnit, SignalType::DATA, latency)))
+      if (failed(timingDB.getLatency(unit, SignalType::DATA, latency)))
         latency = 0.0;
       if (latency == 0.0)
         unitVars.retOut = unitVars.retIn;
@@ -232,6 +240,10 @@ void FPL22Buffers::addUnitPathConstraints(Operation *unit, SignalType type,
       if (!filter(in) || !filter(out))
         return;
 
+      // Flip channels on ready path which goes upstream
+      if (type == SignalType::READY)
+        std::swap(in, out);
+
       GRBVar &tInPort = vars.channelVars[in].paths[type].tOut;
       GRBVar &tOutPort = vars.channelVars[out].paths[type].tIn;
       // Arrival time at unit's output port must be greater than arrival
@@ -278,15 +290,20 @@ void FPL22Buffers::addUnitPathConstraints(Operation *unit, SignalType type,
 }
 
 namespace {
-struct ChannelWire {
+struct Pin {
   Value channel;
   SignalType type;
+
+  Pin(Value channel, SignalType type) : channel(channel), type(type){};
 };
 
 struct MixedDomainConstraint {
-  ChannelWire input;
-  ChannelWire output;
+  Pin input;
+  Pin output;
   double internalDelay;
+
+  MixedDomainConstraint(Pin input, Pin output, double internalDelay)
+      : input(input), output(output), internalDelay(internalDelay){};
 };
 
 } // namespace
@@ -294,18 +311,84 @@ struct MixedDomainConstraint {
 void FPL22Buffers::addUnitMixedPathConstraints(Operation *unit,
                                                ChannelFilter &filter) {
   std::vector<MixedDomainConstraint> constraints;
-  const TimingModel *model = timingDB.getModel(unit);
+  const TimingModel *unitModel = timingDB.getModel(unit);
+
+  // Adds constraints between the input ports' valid and ready pins of a unit
+  // with two operands.
+  auto addJoinedOprdConstraints = [&]() -> void {
+    double vr = unitModel->validToReady;
+    Value oprd0 = unit->getOperand(0), oprd1 = unit->getOperand(1);
+    constraints.emplace_back(Pin(oprd0, SignalType::VALID),
+                             Pin(oprd1, SignalType::READY), vr);
+    constraints.emplace_back(Pin(oprd1, SignalType::VALID),
+                             Pin(oprd0, SignalType::READY), vr);
+  };
+
+  // Adds constraints between the data pin of the provided input channel and all
+  // valid/ready output pins.
+  auto addDataToAllValidReadyConstraints = [&](Value inputChannel) -> void {
+    Pin input(inputChannel, SignalType::DATA);
+    double cv = unitModel->condToValid;
+    for (OpResult res : unit->getResults())
+      constraints.emplace_back(input, Pin(res, SignalType::VALID), cv);
+    double cr = unitModel->condToReady;
+    for (Value oprd : unit->getOperands())
+      constraints.emplace_back(input, Pin(oprd, SignalType::READY), cr);
+  };
 
   llvm::TypeSwitch<Operation *, void>(unit)
       .Case<handshake::ConditionalBranchOp>(
           [&](handshake::ConditionalBranchOp condBrOp) {
+            // There is a path between the data pin of the condition operand and
+            // every valid/ready output pin
+            addDataToAllValidReadyConstraints(condBrOp.getConditionOperand());
 
+            // The two branch inputs are joined therefore there are cross
+            // connections between the valid and ready pins
+            addJoinedOprdConstraints();
           })
-      .Case<handshake::ControlMergeOp>([&](handshake::ControlMergeOp ctrlOp) {})
-      .Case<handshake::MergeOp>([&](handshake::MergeOp mergeOp) {})
-      .Case<handshake::MuxOp>([&](handshake::MuxOp muxOp) {})
-      .Case<handshake::EndOp>([&](handshake::EndOp) {})
-      .Case<arith::AddIOp>([&](auto) {});
+      .Case<handshake::ControlMergeOp>([&](handshake::ControlMergeOp cmergeOp) {
+        // There is a path between the valid pin of the first operand and the
+        // data pin of the index result
+        Pin input(cmergeOp.getOperand(0), SignalType::VALID);
+        Pin output(cmergeOp.getIndex(), SignalType::DATA);
+        constraints.emplace_back(input, output, unitModel->validToCond);
+      })
+      .Case<handshake::MergeOp>([&](handshake::MergeOp mergeOp) {
+        // There is a path between every valid input pin and the data output
+        // pin
+        double vd = unitModel->validToData;
+        Pin output(mergeOp.getResult(), SignalType::DATA);
+        for (Value oprd : mergeOp->getOperands())
+          constraints.emplace_back(Pin(oprd, SignalType::VALID), output, vd);
+      })
+      .Case<handshake::MuxOp>([&](handshake::MuxOp muxOp) {
+        // There is a path between the data pin of the select operand and every
+        // valid/ready output pin
+        addDataToAllValidReadyConstraints(muxOp.getSelectOperand());
+
+        // There is a path between every valid input pin and every data/ready
+        // output pin
+        double vd = unitModel->validToData;
+        double vr = unitModel->validToReady;
+        for (Value oprd : muxOp->getOperands()) {
+          for (OpResult res : muxOp->getResults()) {
+            constraints.emplace_back(Pin(oprd, SignalType::VALID),
+                                     Pin(res, SignalType::DATA), vd);
+          }
+          for (Value readyOprd : muxOp->getOperands()) {
+            constraints.emplace_back(Pin(oprd, SignalType::VALID),
+                                     Pin(readyOprd, SignalType::READY), vr);
+          }
+        }
+      })
+      .Case<handshake::MCLoadOp, handshake::LSQLoadOp, handshake::MCStoreOp,
+            handshake::LSQStoreOp, arith::AddIOp, arith::AddFOp, arith::SubIOp,
+            arith::SubFOp, arith::AndIOp, arith::OrIOp, arith::XOrIOp,
+            arith::MulIOp, arith::MulFOp, arith::DivUIOp, arith::DivSIOp,
+            arith::DivFOp, arith::SIToFPOp, arith::RemSIOp, arith::ShRSIOp,
+            arith::ShLIOp, arith::CmpIOp, arith::CmpFOp>(
+          [&](auto) { addJoinedOprdConstraints(); });
 
   std::string unitName = getUniqueName(unit);
   unsigned idx = 0;
@@ -314,19 +397,11 @@ void FPL22Buffers::addUnitMixedPathConstraints(Operation *unit,
     if (!filter(cons.input.channel) || !filter(cons.output.channel))
       return;
 
-    // Derive variable for arrival time at input pin
-    SignalType inputType = cons.input.type;
-    Value inputChannel = inputType == SignalType::READY ? cons.output.channel
-                                                        : cons.input.channel;
-    TimeVars &inputVars = vars.channelVars[inputChannel].paths[inputType];
-    GRBVar &tPinIn = inputVars.tOut;
-
-    // Derive variable for arrival time at output pin
-    SignalType outputType = cons.input.type;
-    Value outputChannel = outputType == SignalType::READY ? cons.input.channel
-                                                          : cons.output.channel;
-    TimeVars &outputVars = vars.channelVars[outputChannel].paths[outputType];
-    GRBVar &tPinOut = outputVars.tIn;
+    // Find variables for arrival time at input/output pin
+    GRBVar &tPinIn =
+        vars.channelVars[cons.input.channel].paths[cons.input.type].tOut;
+    GRBVar &tPinOut =
+        vars.channelVars[cons.output.channel].paths[cons.input.type].tIn;
 
     // Arrival time at unit's output pin must be greater than arrival time at
     // unit's input pin plus the unit's internal delay on the path
@@ -417,7 +492,7 @@ LogicalResult FPL22Buffers::addThroughputConstraints() {
     CFDFCVars &cfVars = vars.cfVars[cf];
 
     // Add a set of constraints for each channel in the CFDFC
-    for (Value channel : cfUnion.channels) {
+    for (Value channel : cf->channels) {
       // Get the ports the channels connect and their retiming MILP variables
       Operation *srcOp = channel.getDefiningOp();
       Operation *dstOp = *channel.getUsers().begin();
@@ -442,7 +517,7 @@ LogicalResult FPL22Buffers::addThroughputConstraints() {
       GRBVar &bufData = chVars.bufTypePresent[SignalType::DATA];
       GRBVar &bufNumSlots = chVars.bufNumSlots;
       GRBVar &chThroughput = cfVars.channelThroughputs[channel];
-      unsigned backedge = cfUnion.backedges.contains(channel) ? 1 : 0;
+      unsigned backedge = cf->backedges.contains(channel) ? 1 : 0;
 
       // If the channel isn't a backedge, its throughput equals the difference
       // between the fluid retiming of tokens at its endpoints. Otherwise, it is
@@ -465,7 +540,7 @@ LogicalResult FPL22Buffers::addThroughputConstraints() {
     }
 
     // Add a set of constraints for each pipelined unit in the CFDFC
-    for (Operation *unit : cfUnion.units) {
+    for (Operation *unit : cf->units) {
       double latency;
       if (failed(timingDB.getLatency(unit, SignalType::DATA, latency)) ||
           latency == 0.0)

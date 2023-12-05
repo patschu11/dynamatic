@@ -72,8 +72,8 @@ protected:
   /// function to their specific channel buffering properties (unconstraining
   /// properties if none were explicitly specified).
   llvm::MapVector<Value, ChannelBufProps> channels;
-  /// Whether the MILP was detected to be unsatisfiable dureing creation.
-  bool unsatisfiable;
+  /// Whether the MILP was detected to be unsatisfiable during creation.
+  bool unsatisfiable = false;
 
   /// Adds pre-existing buffers that may exist as part of the units the channel
   /// connects to to the buffering properties. These are added to the minimum
