@@ -6,7 +6,15 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// TODO
+// FPL'22 smart buffer placement, as presented in
+// https://ieeexplore.ieee.org/abstract/document/10035122
+//
+// This mainly declares the `FPL22Placement` class, which inherits the abstract
+// `BufferPlacementMILP` class to setup and solve a real MILP from which
+// buffering decisions can be made. Every public member declared in this file is
+// under the `dynamatic::buffer::fpl22` namespace, as to not create name
+// conflicts for common structs with other implementors of
+// `BufferPlacementMILP`.
 //
 //===----------------------------------------------------------------------===//
 
@@ -18,7 +26,6 @@
 #include "dynamatic/Transforms/BufferPlacement/BufferingSupport.h"
 #include "dynamatic/Transforms/BufferPlacement/CFDFC.h"
 #include "llvm/ADT/MapVector.h"
-#include <set>
 
 #ifndef DYNAMATIC_GUROBI_NOT_INSTALLED
 #include "gurobi_c++.h"
@@ -27,69 +34,37 @@ namespace dynamatic {
 namespace buffer {
 namespace fpl22 {
 
+/// Temporarily used for channel path constraints. Denotes the potential
+/// presence of a buffer type that doens't cut the current signal under
+/// consideration but may add a combinational delay to the channel. This should
+/// be quickly deprecated for something more formal.
 struct BufferPathDelay {
+  /// MILP variable denoting the buffer presence of a buffer type on a different
+  /// signal.
   GRBVar &present;
+  /// Combinational delay (in ns) introduced by the buffer, if present.
   double delay;
 
+  /// Simple member-by-member constructor.
   BufferPathDelay(GRBVar &present, double delay = 0.0)
       : present(present), delay(delay){};
 };
 
-/// Holds MILP variables associated to every CFDFC unit. Note that a unit may
-/// appear in multiple CFDFCs and so may have multiple sets of these variables.
-struct UnitVars {
-  /// Fluid retiming of tokens at unit's input (real).
-  GRBVar retIn;
-  /// Fluid retiming of tokens at unit's output. Identical to retiming at unit's
-  /// input if the latter is combinational (real).
-  GRBVar retOut;
-};
-
-/// Holds all MILP variables associated to a channel.
-struct ChannelVars {
-  std::map<SignalType, TimeVars> paths;
-  TimeVars elastic;
-
-  GRBVar bufPresent;
-  GRBVar bufNumSlots;
-  std::map<SignalType, GRBVar> bufTypePresent;
-};
-
-/// Holds all variables associated to a CFDFC. These are a set of variables for
-/// each unit inside the CFDFC, a throughput variable for each channel inside
-/// the CFDFC, and a CFDFC throughput varriable.
-struct CFDFCVars {
-  /// Maps each CFDFC unit to its retiming variables.
-  llvm::MapVector<Operation *, UnitVars> unitVars;
-  /// Channel throughput variables (real).
-  llvm::MapVector<Value, GRBVar> channelThroughputs;
-  /// CFDFC throughput (real).
-  GRBVar throughput;
-};
-
-/// Holds all variables associated to a CFDFC union. These are a set of
-/// variables for each unit and channel inside the CFDFC union and a CFDFC
-/// throughput variable.
-// struct CFDFCVars {};
-
-/// Holds all variables that may be used in the MILP. These are a set of
-/// variables for each CFDFC and a set of variables for each channel in the
-/// function.
-struct MILPVars {
-  /// Mapping between each CFDFC and their related variables.
-  llvm::MapVector<CFDFC *, CFDFCVars> cfVars;
-  /// Maps each of the CFDFC union's channels to its variables.
-  DenseMap<Value, ChannelVars> channelVars;
-};
-
-/// Holds the state and logic for FPL22'20 smart buffer placement. To buffer a
-/// dataflow circuit, this MILP-based algorithm creates:
-/// TODO
+/// Holds the state and logic for FPL'22 smart buffer placement. This MILP
+/// operates on the channels and units from a single CFDFC union derived from
+/// the set of CFDFCs identified for a Handshake function. It takes into account
+/// all timing domains of dataflow circuits (data, valid, ready) to derive an
+/// optimal buffer placement. It creates
+/// 1. custom channel constraints derived from channel-specific buffering
+///    properties
+/// 2. path constraints on all timing domains (including mixed-domain
+///    connections within units)
+/// 3. elasticity constraints
+/// 4. throughput constraints for all CFDFCs that are part of the CFDFC union
+/// 5. a maximixation objective, that rewards high CFDFC throughputs and
+///    penalizes the placement of many large buffers in the circuit
 class FPL22Buffers : public BufferPlacementMILP {
 public:
-  /// Target clock period.
-  const double targetPeriod;
-
   /// Setups the entire MILP that buffers the input dataflow circuit for the
   /// target clock period, after which (absent errors) it is ready for
   /// optimization. If a channel's buffering properties are provably
@@ -106,43 +81,52 @@ public:
                StringRef milpName);
 
 protected:
-  using ChannelFilter = const std::function<bool(Value)> &;
-
-  /// Contains all variables used throughout the MILP.
-  MILPVars vars;
-  /// TODO
-  CFDFCUnion &cfUnion;
-
-  /// TODO
+  /// Interprets the MILP solution to derive buffer placement decisions. Since
+  /// the MILP cannot encode the placement of both opaque and transparent slots
+  /// on a single channel, some "interpretation" of the results is necessary to
+  /// derive "mixed" placements where some buffer slots are opaque and some are
+  /// transparent.
   void extractResult(BufferPlacement &placement) override;
 
-  /// Setups the entire MILP, first creating all variables, then all
-  /// constraints, and finally setting the system's objective. Called by the
-  /// constructor in the absence of prior failures, after which the MILP is
-  /// ready to be optimized.
-  LogicalResult setup();
+private:
+  /// The CFDFC union over which the MILP is described. Constraints are only
+  /// created over the channels and units that are part of this union.
+  CFDFCUnion &cfUnion;
 
-  /// Adds all variables used in the MILP to the Gurobi model.
-  LogicalResult createVars();
+  /// Adds channel-specific buffering constraints that were parsed from IR
+  /// annotations to the Gurobi model.
+  void addCustomChannelConstraints(Value channel);
 
-  LogicalResult addCustomChannelConstraints();
-
+  /// Adds path constraints for a specific signal of the provided channel.
+  /// At the moment these *do not* take into account channel delays as may be
+  /// specified in the channel's buffering properties.
+  ///
+  /// It is only valid to call this method after having added variables for the
+  /// channel to the model.
   void addChannelPathConstraints(Value channel, SignalType type,
                                  const BufferPathDelay &otherBuffer);
 
-  void addUnitPathConstraints(Operation *unit, SignalType type,
-                              ChannelFilter &filter);
+  /// Adds path constraints between pins of the unit's input and output ports in
+  /// different timing domains. At the moment the set of mixed-domain
+  /// constraints is determined by the method itself, which contains
+  /// case-by-case logic to derive them based on the operation's type.
+  /// Eventually, we will support formal timing models that will themselves
+  /// carry that information, at which point this method will be drastically
+  /// simplified.
+  ///
+  /// A `filter` can be provided to filter out constraints involving input or
+  /// output ports connected to channels for which the filter returns false. The
+  /// default filter always returns true. It is only valid to call this method
+  /// after having added channel variables to the model for all channels
+  /// adjacent to the unit, unless these channels are filtered out by the
+  /// `filter` function.
+  void addUnitMixedPathConstraints(Operation *unit,
+                                   ChannelFilter filter = nullFilter);
 
-  void addUnitMixedPathConstraints(Operation *unit, ChannelFilter &filter);
-
-  LogicalResult addPathConstraints();
-
-  LogicalResult addElasticityConstraints();
-
-  LogicalResult addThroughputConstraints();
-
-  /// Adds the objective to the Gurobi model.
-  LogicalResult addObjective();
+  /// Setups the entire MILP, creating all variables, constraints, and setting
+  /// the system's objective. Called by the constructor in the absence of prior
+  /// failures, after which the MILP is ready to be optimized.
+  void setup();
 };
 
 } // namespace fpl22
