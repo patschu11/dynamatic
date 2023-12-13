@@ -118,6 +118,14 @@ def HandshakeMaterialize : DynamaticPass<"handshake-materialize"> {
   let constructor = "dynamatic::createHandshakeMaterialize()";
 }
 
+def HandshakeMiminizeLSQUsage : DynamaticPass<"handshake-minimize-lsq-usage"> {
+  let summary = "Minimizes LSQ sizes by performing flow analysis.";
+  let description = [{
+    TODO
+  }];
+  let constructor = "dynamatic::createHandshakeMinimizeLSQUsage()";
+}
+
 def HandshakePrepareForLegacy : DynamaticPass<"handshake-prepare-for-legacy"> {
   let summary = "Prepare the IR for usage in legacy Dynamatic.";
   let description = [{
