@@ -16,6 +16,7 @@
 
 #include "circt/Conversion/StandardToHandshake.h"
 #include "circt/Dialect/Handshake/HandshakeOps.h"
+#include "dynamatic/Analysis/NameAnalysis.h"
 #include "dynamatic/Support/DynamaticPass.h"
 #include "dynamatic/Support/LLVM.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -56,7 +57,8 @@ public:
   using MemInterfacesInputs = llvm::MapVector<Value, MemInputs>;
 
   /// Constructor simply forwards its arguments to the parent class.
-  explicit HandshakeLoweringFPGA18(Region &r) : HandshakeLowering(r) {}
+  explicit HandshakeLoweringFPGA18(Region &r, NameAnalysis &nameAnalysis)
+      : HandshakeLowering(r), nameAnalysis(nameAnalysis) {}
 
   /// Creates the control-only network by adding a control-only argument to the
   /// region's entry block and forwarding it through all basic blocks.
@@ -121,6 +123,8 @@ public:
   LogicalResult createReturnNetwork(ConversionPatternRewriter &rewriter);
 
 private:
+  /// Name analysis to name new memory operations as they are created.
+  NameAnalysis &nameAnalysis;
 };
 
 std::unique_ptr<dynamatic::DynamaticPass> createStandardToHandshakeFPGA18Pass();

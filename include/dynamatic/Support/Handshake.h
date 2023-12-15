@@ -43,4 +43,18 @@ void eraseSinkUsers(Value val, PatternRewriter &rewriter);
 SmallVector<Value> getLSQControlPaths(circt::handshake::LSQOp lsqOp,
                                       Operation *ctrlOp);
 
+/// Recursive function that determines whether a value is globally in-order
+/// dependent on another value. In other words, the function answers the
+/// following question: is `dependOn` always (i.e., independently of the path
+/// through the DFG) involved in the determination of `val`?
+///
+/// The function achieves this by "bactracking" through the dataflow circuit
+/// (from operations' results to operands) in search for the `dependOn` value.
+/// The backtracking behavior is influenced by the type of the operation
+/// traversed at each step. As it backtracks, the function keeps track of the
+/// set of operations it has crossed on its path to be able to break cycles in
+/// the DFG.
+bool isGIID(Value dependOn, Value val,
+            const mlir::DenseSet<Operation *> &path = {});
+
 } // namespace dynamatic

@@ -12,7 +12,9 @@
 
 #include "dynamatic/Support/Handshake.h"
 #include "circt/Dialect/Handshake/HandshakeOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Value.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 using namespace mlir;
@@ -95,4 +97,98 @@ SmallVector<Value> dynamatic::getLSQControlPaths(handshake::LSQOp lsqOp,
   }
 
   return controlValues;
+}
+
+bool dynamatic::isGIID(Value dependOn, Value val,
+                       const DenseSet<Operation *> &path) {
+  if (dependOn == val)
+    return true;
+
+  Operation *defOp = val.getDefiningOp();
+  if (!defOp)
+    return false;
+  if (path.contains(defOp)) {
+    // If we are encountering an operation for the second time it means that we
+    // went through an entire CFG cycle, which implies that there was a
+    // merge-like operation on our path that is computing the conjunction of
+    // this function's results on all its data inputs. In that case, the merge
+    // inputs coming from outside the cycle determine whether the entire cycle
+    // depends on the value, so we return true to not falsify the conjunction.
+    // If merge input coming from outside the cycle do not depend on the value,
+    // the function's top-level call will still return false
+    return true;
+  }
+
+  // Recursively call the function with a new value as second argument (meant to
+  // be an operand to the defining operation) and adding the defining operation
+  // to the path.
+  auto recGIID = [&](Value newVal) -> bool {
+    DenseSet<Operation *> newPath(path);
+    newPath.insert(defOp);
+    return isGIID(dependOn, newVal, newPath);
+  };
+
+  // The backtracking logic depends on the type of the defining operation
+  return llvm::TypeSwitch<Operation *, bool>(defOp)
+      .Case<handshake::ConditionalBranchOp>(
+          [&](handshake::ConditionalBranchOp condBrOp) {
+            // The data operand or the condition operand must depend on the
+            // value
+            return recGIID(condBrOp.getDataOperand()) ||
+                   recGIID(condBrOp.getConditionOperand());
+          })
+      .Case<handshake::MergeOp, handshake::ControlMergeOp>([&](auto) {
+        // All data inputs must depend on the value
+        return llvm::all_of(defOp->getOperands(), [&](Value mergeLikeOprd) {
+          return recGIID(mergeLikeOprd);
+        });
+      })
+      .Case<handshake::MuxOp>([&](handshake::MuxOp muxOp) {
+        // If the select operand depends on the value, then the mux depends on
+        // the value
+        if (recGIID(muxOp.getSelectOperand()))
+          return true;
+        // Otherwise, all data inputs must depend on the value
+        return llvm::all_of(defOp->getOperands(), [&](Value mergeLikeOprd) {
+          return recGIID(mergeLikeOprd);
+        });
+      })
+      .Case<handshake::DynamaticReturnOp>([&](auto) {
+        // Just recurse the call on the return operand corresponding to the
+        // value
+        return recGIID(
+            defOp->getOperand(cast<OpResult>(val).getResultNumber()));
+      })
+      .Case<handshake::MCLoadOp, handshake::LSQLoadOp>([&](auto) {
+        auto loadOp = cast<handshake::LoadOpInterface>(defOp);
+        if (loadOp.getDataOutput() != val)
+          return false;
+
+        // If the address operand depends on the value then the data result
+        // depends on the value
+        return recGIID(loadOp.getAddressInput());
+      })
+      .Case<arith::SelectOp>([&](arith::SelectOp selectOp) {
+        // Similarly to the mux, if the select operand depends on the value,
+        // then the select depends on the value
+        if (recGIID(selectOp.getCondition()))
+          return true;
+
+        // The select's true value and false value must depend on the value
+        return recGIID(selectOp.getTrueValue()) &&
+               recGIID(selectOp.getFalseValue());
+      })
+      .Case<handshake::ForkOp, handshake::LazyForkOp, handshake::BufferOp,
+            handshake::BranchOp, arith::AddIOp, arith::AndIOp, arith::CmpIOp,
+            arith::DivSIOp, arith::DivUIOp, arith::ExtSIOp, arith::ExtUIOp,
+            arith::MulIOp, arith::OrIOp, arith::RemUIOp, arith::RemSIOp,
+            arith::ShLIOp, arith::ShRUIOp, arith::SIToFPOp, arith::SubIOp,
+            arith::TruncIOp, arith::UIToFPOp, arith::XOrIOp, arith::AddFOp,
+            arith::CmpFOp, arith::DivFOp, arith::ExtFOp, arith::MulFOp,
+            arith::RemFOp, arith::SubFOp, arith::TruncFOp>([&](auto) {
+        // At least one operand must depend on the value
+        return llvm::any_of(defOp->getOperands(),
+                            [&](Value oprd) { return recGIID(oprd); });
+      })
+      .Default([&](auto) { return false; });
 }
