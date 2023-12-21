@@ -14,7 +14,7 @@
 #define DYNAMATIC_TRANSFORMS_HANDSHAKECONCRETIZEINDEXTYPE_H
 
 #include "circt/Dialect/Handshake/HandshakeOps.h"
-#include "dynamatic/Support/DynamaticPass.h"
+#include "dynamatic/Support/Dynamatic.h"
 #include "dynamatic/Support/LLVM.h"
 #include "mlir/Pass/Pass.h"
 

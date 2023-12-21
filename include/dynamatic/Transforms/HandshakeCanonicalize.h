@@ -20,7 +20,7 @@
 #ifndef DYNAMATIC_TRANSFORMS_HANDSHAKECANONICALIZE_H
 #define DYNAMATIC_TRANSFORMS_HANDSHAKECANONICALIZE_H
 
-#include "dynamatic/Support/DynamaticPass.h"
+#include "dynamatic/Support/Dynamatic.h"
 #include "dynamatic/Support/LLVM.h"
 #include "mlir/Pass/Pass.h"
 

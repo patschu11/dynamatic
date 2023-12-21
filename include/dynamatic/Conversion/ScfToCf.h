@@ -13,7 +13,7 @@
 #ifndef DYNAMATIC_TRANSFORMS_SCFTOCF_H
 #define DYNAMATIC_TRANSFORMS_SCFTOCF_H
 
-#include "dynamatic/Support/DynamaticPass.h"
+#include "dynamatic/Support/Dynamatic.h"
 #include "dynamatic/Support/LLVM.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"

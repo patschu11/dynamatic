@@ -15,7 +15,7 @@
 #ifndef DYNAMATIC_TRANSFORMS_ARITHREDUCESTRENGTH_H
 #define DYNAMATIC_TRANSFORMS_ARITHREDUCESTRENGTH_H
 
-#include "dynamatic/Support/DynamaticPass.h"
+#include "dynamatic/Support/Dynamatic.h"
 #include "dynamatic/Support/LLVM.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Pass/Pass.h"

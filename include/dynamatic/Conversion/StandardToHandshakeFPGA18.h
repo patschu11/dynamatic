@@ -16,7 +16,7 @@
 
 #include "circt/Conversion/StandardToHandshake.h"
 #include "circt/Dialect/Handshake/HandshakeOps.h"
-#include "dynamatic/Support/DynamaticPass.h"
+#include "dynamatic/Support/Dynamatic.h"
 #include "dynamatic/Support/LLVM.h"
 #include "mlir/Transforms/DialectConversion.h"
 

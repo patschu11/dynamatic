@@ -94,7 +94,7 @@
 #ifndef DYNAMATIC_TRANSFORMS_BACK_ANNOTATE_H
 #define DYNAMATIC_TRANSFORMS_BACK_ANNOTATE_H
 
-#include "dynamatic/Support/DynamaticPass.h"
+#include "dynamatic/Support/Dynamatic.h"
 #include "dynamatic/Support/LLVM.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Pass/Pass.h"

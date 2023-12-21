@@ -1,4 +1,4 @@
-//===- DynamaticPass.h - Base class for Dynamatic passes --------*- C++ -*-===//
+//===- Dynamatic.h - Dynamatic-specific MLIR support ------------*- C++ -*-===//
 //
 // Dynamatic is under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,15 +6,20 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Support for pass writing in Dynamatic. Defines the `DynamaticPass` class
-// which TableGen-generated pass classes (e.g.,
-// `dynamatic::impl::<PassName>Base`) may choose to inherit from to get access
-// to classic invariant checking logic and avoid common boilerplate code.
+// This contains subclasses of common MLIR types that are specialized for
+// Dynamatic use cases. Users may choose to use these types instead of the
+// corresponding parent MLIR types to benefit from common post/pre-processing
+// steps around standard methods.
+//
+// At the moment, this only defines the `DynamaticPass` class which
+// TableGen-generated pass classes (e.g., `dynamatic::impl::<PassName>Base`) may
+// choose to inherit from to get access to classic invariant checking logic and
+// avoid common boilerplate code.
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef DYNAMATIC_TRANSFORMS_DYNAMATICPASS_H
-#define DYNAMATIC_TRANSFORMS_DYNAMATICPASS_H
+#ifndef DYNAMATIC_TRANSFORMS_DYNAMATIC_H
+#define DYNAMATIC_TRANSFORMS_DYNAMATIC_H
 
 #include "dynamatic/Analysis/NameAnalysis.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -29,10 +34,10 @@ namespace dynamatic {
 /// pass is meant to factor in common invariant checks and analysis steps that
 /// most Dynamatic passes care about (e.g., naming analysis).
 ///
-/// Implementors should override the `runDynamaticPass` method instead of the
-/// standard `runOnOperation` method to implement their pass's logic; the latter
-/// is defined by this class and performs invariant checking around the call to
-/// `runDynamaticPass`.
+/// Implementors should override the `DynamaticPass::runDynamaticPass` method
+/// instead of the standard `OperationPass::runOnOperation` method to implement
+/// their pass's logic; the latter is defined by this class and performs
+/// invariant checking around the call to `DynamaticPass::runDynamaticPass`.
 class DynamaticPass : public mlir::OperationPass<mlir::ModuleOp> {
 protected:
   /// Simply forwards the pass's type ID to the parent `mlir::OperationPass`.
@@ -82,4 +87,4 @@ private:
 
 } // namespace dynamatic
 
-#endif // DYNAMATIC_TRANSFORMS_DYNAMATICPASS_H
+#endif // DYNAMATIC_TRANSFORMS_DYNAMATIC_H

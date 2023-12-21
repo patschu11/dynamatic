@@ -16,7 +16,7 @@
 #define DYNAMATIC_TRANSFORMS_BUFFERPLACEMENT_PLACEBUFFERS_H
 
 #include "circt/Dialect/Handshake/HandshakeOps.h"
-#include "dynamatic/Support/DynamaticPass.h"
+#include "dynamatic/Support/Dynamatic.h"
 #include "dynamatic/Support/LLVM.h"
 #include "dynamatic/Support/Logging.h"
 #include "dynamatic/Support/TimingModels.h"

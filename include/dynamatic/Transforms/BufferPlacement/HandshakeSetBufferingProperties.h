@@ -28,7 +28,7 @@
 #define DYNAMATIC_TRANSFORMS_BUFFERPLACEMENT_HANDSHAKESETBUFFERINGPROPERTIES_H
 
 #include "circt/Dialect/Handshake/HandshakeOps.h"
-#include "dynamatic/Support/DynamaticPass.h"
+#include "dynamatic/Support/Dynamatic.h"
 #include "dynamatic/Support/LLVM.h"
 #include "dynamatic/Transforms/BufferPlacement/HandshakePlaceBuffers.h"
 #include "mlir/IR/DialectRegistry.h"

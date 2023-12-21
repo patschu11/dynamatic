@@ -16,7 +16,7 @@
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "dynamatic/Conversion/PassDetails.h"
 #include "dynamatic/Support/Attribute.h"
-#include "dynamatic/Support/DynamaticPass.h"
+#include "dynamatic/Support/Dynamatic.h"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Affine/Utils.h"

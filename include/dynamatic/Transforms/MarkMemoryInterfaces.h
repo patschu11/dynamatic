@@ -13,7 +13,7 @@
 #ifndef DYNAMATIC_TRANSFORMS_MARK_MEMORY_INTERFACES
 #define DYNAMATIC_TRANSFORMS_MARK_MEMORY_INTERFACES
 
-#include "dynamatic/Support/DynamaticPass.h"
+#include "dynamatic/Support/Dynamatic.h"
 #include "dynamatic/Support/LLVM.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Pass/Pass.h"

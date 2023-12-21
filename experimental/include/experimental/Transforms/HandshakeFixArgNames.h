@@ -13,7 +13,7 @@
 #ifndef EXPERIMENTAL_TRANSFORMS_HANDHSHAKEFIXARGNAMES_H
 #define EXPERIMENTAL_TRANSFORMS_HANDHSHAKEFIXARGNAMES_H
 
-#include "dynamatic/Support/DynamaticPass.h"
+#include "dynamatic/Support/Dynamatic.h"
 #include "dynamatic/Support/LLVM.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Pass/Pass.h"

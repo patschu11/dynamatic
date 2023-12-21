@@ -13,7 +13,7 @@
 #ifndef DYNAMATIC_TRANSFORMS_SCFROTATEFORLOOPS_H
 #define DYNAMATIC_TRANSFORMS_SCFROTATEFORLOOPS_H
 
-#include "dynamatic/Support/DynamaticPass.h"
+#include "dynamatic/Support/Dynamatic.h"
 #include "dynamatic/Support/LLVM.h"
 
 namespace dynamatic {
