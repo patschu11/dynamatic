@@ -20,6 +20,7 @@
 #include "dynamatic/Analysis/NameAnalysis.h"
 #include "dynamatic/Conversion/PassDetails.h"
 #include "dynamatic/Support/Attribute.h"
+#include "dynamatic/Support/Handshake.h"
 #include "dynamatic/Support/LogicBB.h"
 #include "mlir/Dialect/Affine/Analysis/AffineAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -257,9 +258,9 @@ LogicalResult HandshakeLoweringFPGA18::replaceMemoryOps(
     }
   }
 
-  // Store a temporary mapping between the old memory operations and the new
-  // ones, so that we can later transfer memory dependency attributes
-  DenseMap<Operation *, Operation *> oldToNewMemOps;
+  // Used to keep consistency betweeen memory access names referenced by memory
+  // dependencies and names of replaced memory operations
+  MemoryOpLowering memOpLowering(nameAnalysis);
 
   // Replace load and store operations with their corresponding Handshake
   // equivalent. Traverse and store memory operations in program order (required
@@ -313,7 +314,7 @@ LogicalResult HandshakeLoweringFPGA18::replaceMemoryOps(
             })
             .Case<memref::StoreOp>([&](memref::StoreOp storeOp) {
               OperandRange indices = storeOp.getIndices();
-              assert(indices.size() == 1 && "load must be unidimensional");
+              assert(indices.size() == 1 && "store must be unidimensional");
               Value addr = indices.front();
               Value data = storeOp.getValueToStore();
 
@@ -324,17 +325,13 @@ LogicalResult HandshakeLoweringFPGA18::replaceMemoryOps(
               return success();
             })
             .Default([&](auto) {
-              return op.emitError()
-                     << "Memory operation type is not supported.";
+              return op.emitError() << "Memory operation type unsupported.";
             });
     if (failed(res))
       return failure();
 
-    // Name the new operation so that it can be referenced by memory dependency
-    // attributes when they are transferred to the new memory operation, and
-    // associate it to the operation it replaces
-    nameAnalysis.setName(newOp);
-    oldToNewMemOps[&op] = newOp;
+    // Record the memory access replacement
+    memOpLowering.recordReplacement(&op, newOp, false);
 
     // Associate the new operation with the memory region it references and
     // information about the memory interface it should connect to
@@ -342,32 +339,14 @@ LogicalResult HandshakeLoweringFPGA18::replaceMemoryOps(
       memInfo[memref].mcPorts[op.getBlock()].push_back(newOp);
     else
       memInfo[memref].lsqPorts[*memAttr.getLsqGroup()].push_back(newOp);
+
+    // Erase the original operation
+    rewriter.eraseOp(&op);
   }
 
-  // Transfer memory dependency lists from old to new operations, replacing
-  // operation names in the process
-  MLIRContext *ctx = rewriter.getContext();
-  StringRef depsName = MemDependenceArrayAttr::getMnemonic();
-  for (auto [oldOp, newOp] : oldToNewMemOps) {
-    auto oldMemDeps = oldOp->getAttrOfType<MemDependenceArrayAttr>(depsName);
-    if (oldMemDeps) {
-      // Copy memory dependence attributes one-by-one, replacing the name of the
-      // operation referenced by each dependency with the name of the new
-      // corresponding memory operation
-      SmallVector<MemDependenceAttr> newMemDeps;
-      for (MemDependenceAttr oldDep : oldMemDeps.getDependencies()) {
-        Operation *memOp = nameAnalysis.getOp(oldDep.getDstAccess());
-        StringRef newOpName = nameAnalysis.getName(oldToNewMemOps[memOp]);
-        newMemDeps.push_back(MemDependenceAttr::get(
-            ctx, StringAttr::get(ctx, newOpName), oldDep.getLoopDepth(),
-            oldDep.getComponents()));
-      }
-      newOp->setAttr(depsName, MemDependenceArrayAttr::get(ctx, newMemDeps));
-    }
-
-    // Erase the old operation
-    rewriter.eraseOp(oldOp);
-  }
+  // Change the name of destination memory acceses in all stored memory
+  // dependencies to reflect the new access names
+  memOpLowering.renameDependencies(r.getParentOp());
 
   return success();
 }

@@ -56,7 +56,8 @@ public:
   using MemInterfacesInfo = llvm::MapVector<Value, MemAccesses>;
   using MemInterfacesInputs = llvm::MapVector<Value, MemInputs>;
 
-  /// Constructor simply forwards its arguments to the parent class.
+  /// Constructor simply forwards the region to its parent class and stores a
+  /// reference to the top-level name analysis.
   explicit HandshakeLoweringFPGA18(Region &r, NameAnalysis &nameAnalysis)
       : HandshakeLowering(r), nameAnalysis(nameAnalysis) {}
 
@@ -123,7 +124,8 @@ public:
   LogicalResult createReturnNetwork(ConversionPatternRewriter &rewriter);
 
 private:
-  /// Name analysis to name new memory operations as they are created.
+  /// Name analysis to name new memory operations as they are created and keep
+  /// reference accesses in memory dependencies consistent.
   NameAnalysis &nameAnalysis;
 };
 
