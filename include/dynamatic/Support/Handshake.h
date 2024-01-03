@@ -13,6 +13,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#ifndef DYNAMATIC_SUPPORT_HANDSHAKE_H
+#define DYNAMATIC_SUPPORT_HANDSHAKE_H
+
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "dynamatic/Analysis/NameAnalysis.h"
 #include "dynamatic/Support/LLVM.h"
@@ -102,3 +105,5 @@ SmallVector<Value> getLSQControlPaths(circt::handshake::LSQOp lsqOp,
 bool isGIID(Value predecessor, Value val, CFGPath &path);
 
 } // namespace dynamatic
+
+#endif // DYNAMATIC_SUPPORT_HANDSHAKE_H

@@ -14,6 +14,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#ifndef DYNAMATIC_SUPPORT_LOGICBB_H
+#define DYNAMATIC_SUPPORT_LOGICBB_H
+
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "dynamatic/Support/LLVM.h"
 #include "llvm/ADT/SmallSet.h"
@@ -107,3 +110,5 @@ private:
 };
 
 } // namespace dynamatic
+
+#endif // DYNAMATIC_SUPPORT_LOGICBB_H
