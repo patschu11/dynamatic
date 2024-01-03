@@ -13,41 +13,28 @@
 #include "dynamatic/Transforms/HandshakeMinimizeLSQUsage.h"
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "dynamatic/Analysis/NameAnalysis.h"
+#include "dynamatic/Support/Attribute.h"
 #include "dynamatic/Support/Handshake.h"
 #include "dynamatic/Support/LogicBB.h"
+#include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Visitors.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/STLExtras.h"
 
 using namespace mlir;
 using namespace circt;
 using namespace circt::handshake;
 using namespace dynamatic;
 
-static bool rawToLoadExists(handshake::LSQLoadOp loadOp,
-                            SetVector<handshake::LSQStoreOp> &storeOps,
-                            NameAnalysis &nameAnalysis) {
-  StringRef loadName = nameAnalysis.getName(loadOp);
-  for (handshake::LSQStoreOp storeOp : storeOps) {
-    StringRef depsName = MemDependenceArrayAttr::getMnemonic();
-    auto deps = storeOp->getAttrOfType<MemDependenceArrayAttr>(depsName);
-    for (MemDependenceAttr dependency : deps.getDependencies()) {
-      if (dependency.getDstAccess() == loadName)
-        return true;
-    }
-  }
-  return false;
-}
-
-/// Checks whether all store operations are globally in-order dependent on the
-/// load operation.
-static bool storesAreGIIDOnLoad(handshake::LSQLoadOp loadOp,
-                                SetVector<handshake::LSQStoreOp> &storeOps) {
-  Value ldData = loadOp.getDataResult();
-  return llvm::all_of(storeOps, [&](handshake::LSQStoreOp storeOp) {
-    return isGIID(ldData, storeOp.getDataInput()) ||
-           isGIID(ldData, storeOp.getAddressInput());
-  });
-}
-
 namespace {
+
+/// TODO
+struct MinimizeLSQUsage : public OpRewritePattern<handshake::LSQOp> {
+  using OpRewritePattern<handshake::LSQOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(handshake::LSQOp lsqOp,
+                                PatternRewriter &rewriter) const override;
+};
 
 /// TODO
 struct HandshakeMinimizeLSQUsagePass
@@ -56,22 +43,85 @@ struct HandshakeMinimizeLSQUsagePass
 
   void runDynamaticPass() override {
     mlir::ModuleOp modOp = getOperation();
-    OpBuilder builder(&getContext());
+    MLIRContext *ctx = &getContext();
 
-    for (handshake::FuncOp funcOp : modOp.getOps<handshake::FuncOp>()) {
-      for (handshake::LSQOp lsqOp :
-           llvm::make_early_inc_range(funcOp.getOps<handshake::LSQOp>())) {
-        tryToReduceLSQUsage(lsqOp, builder);
+    // Check that memory access ports are named
+    NameAnalysis &namer = getAnalysis<NameAnalysis>();
+    WalkResult res = modOp.walk([&](Operation *op) {
+      if (!isa<handshake::LoadOpInterface, handshake::StoreOpInterface>(op))
+        return WalkResult::advance();
+      if (!namer.hasName(op)) {
+        op->emitError() << "Memory access port must be named.";
+        return WalkResult::interrupt();
       }
-    }
-  }
+      return WalkResult::advance();
+    });
+    if (res.wasInterrupted())
+      return signalPassFailure();
 
-  void tryToReduceLSQUsage(handshake::LSQOp lsqOp, OpBuilder &builder);
+    mlir::GreedyRewriteConfig config;
+    config.useTopDownTraversal = true;
+    config.enableRegionSimplification = false;
+
+    RewritePatternSet patterns{ctx};
+    patterns.add<MinimizeLSQUsage>(ctx);
+    if (failed(
+            applyPatternsAndFoldGreedily(modOp, std::move(patterns), config)))
+      return signalPassFailure();
+  }
 };
 } // namespace
 
-void HandshakeMinimizeLSQUsagePass::tryToReduceLSQUsage(handshake::LSQOp lsqOp,
-                                                        OpBuilder &builder) {
+static bool hasRAW(handshake::LSQLoadOp loadOp,
+                   SetVector<handshake::LSQStoreOp> &storeOps) {
+  std::string loadName = getUniqueName(loadOp);
+  for (handshake::LSQStoreOp storeOp : storeOps) {
+    auto deps = getUniqueAttr<MemDependenceArrayAttr>(storeOp);
+    for (MemDependenceAttr dependency : deps.getDependencies()) {
+      if (dependency.getDstAccess() == loadName)
+        return true;
+    }
+  }
+  return false;
+}
+
+static bool isStoreGIIDOnLoad(handshake::LSQLoadOp loadOp,
+                              handshake::LSQStoreOp storeOp) {
+
+  return false;
+}
+
+static bool hasEnforcedWARs(handshake::LSQLoadOp loadOp,
+                            SetVector<handshake::LSQStoreOp> &storeOps) {
+  DenseMap<StringRef, handshake::LSQStoreOp> storesByName;
+  for (handshake::LSQStoreOp storeOp : storeOps)
+    storesByName[getUniqueName(storeOp)] = storeOp;
+
+  // We only need to check stores that depend on the load (WAR dependencies) as
+  // others are already provably independent. We may check a single store
+  // multiple times if it depends on the load at multiple loop depths
+  auto deps = getUniqueAttr<MemDependenceArrayAttr>(loadOp);
+  for (MemDependenceAttr dependency : deps.getDependencies()) {
+    handshake::LSQStoreOp storeOp = storesByName[dependency.getDstAccess()];
+    if (!isStoreGIIDOnLoad(loadOp, storeOp))
+      return false;
+  }
+  return true;
+}
+
+static bool isStoreRemovable(handshake::LSQStoreOp storeOp,
+                             SetVector<StringRef> &independentAccesses) {
+  auto deps = getUniqueAttr<MemDependenceArrayAttr>(storeOp);
+  return llvm::all_of(
+      deps.getDependencies(), [&](MemDependenceAttr dependency) {
+        return independentAccesses.contains(dependency.getDstAccess());
+      });
+}
+
+LogicalResult
+MinimizeLSQUsage::matchAndRewrite(handshake::LSQOp lsqOp,
+                                  PatternRewriter &rewriter) const {
+
   // Collect loads and stores to the LSQ
   SetVector<handshake::LSQLoadOp> loadOps;
   SetVector<handshake::LSQStoreOp> storeOps;
@@ -87,21 +137,25 @@ void HandshakeMinimizeLSQUsagePass::tryToReduceLSQUsage(handshake::LSQOp lsqOp,
   }
 
   // Compute the set of loads that can be removed from the LSQ
-  SetVector<handshake::LSQLoadOp> removableLoads;
-  NameAnalysis &nameAnalysis = getAnalysis<NameAnalysis>();
+  SetVector<StringRef> removableLoads;
   for (handshake::LSQLoadOp loadOp : loadOps) {
-    // Check for RAW dependencies between and for the GIID property between all
-    // the stores and the load
-    if (!rawToLoadExists(loadOp, storeOps, nameAnalysis) &&
-        storesAreGIIDOnLoad(loadOp, storeOps)) {
-      removableLoads.insert(loadOp);
-    }
+    // Check for RAW dependencies with the load and for the GIID property
+    // between all the stores and the load
+    if (!hasRAW(loadOp, storeOps) && hasEnforcedWARs(loadOp, storeOps))
+      removableLoads.insert(getUniqueName(loadOp));
   }
   if (removableLoads.empty())
-    return;
+    return failure();
 
-  // Compute the set of stores that can be removed from the LSQ now that some
-  // loads are out
+  // Compute the set of stores that can be removed from the LSQ now we know that
+  // some loads are out
+  SetVector<StringRef> removableStores;
+  for (handshake::LSQStoreOp storeOp : storeOps) {
+    if (isStoreRemovable(storeOp, removableLoads))
+      removableStores.insert(getUniqueName(storeOp));
+  }
+
+  return success();
 }
 
 std::unique_ptr<dynamatic::DynamaticPass>

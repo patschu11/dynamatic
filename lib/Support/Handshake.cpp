@@ -147,33 +147,38 @@ SmallVector<Value> dynamatic::getLSQControlPaths(handshake::LSQOp lsqOp,
   return controlValues;
 }
 
-bool dynamatic::isGIID(Value dependOn, Value val,
-                       const DenseSet<Operation *> &path) {
-  if (dependOn == val)
+static bool isGIIDRec(Value predecessor, Value val, CFGPath &path,
+                      unsigned pathIdx) {
+  if (predecessor == val)
     return true;
 
+  // The defining operation must exist, otherwise it means we have reached
+  // function arguments without encountering the predecessor value
   Operation *defOp = val.getDefiningOp();
   if (!defOp)
     return false;
-  if (path.contains(defOp)) {
-    // If we are encountering an operation for the second time it means that we
-    // went through an entire CFG cycle, which implies that there was a
-    // merge-like operation on our path that is computing the conjunction of
-    // this function's results on all its data inputs. In that case, the merge
-    // inputs coming from outside the cycle determine whether the entire cycle
-    // depends on the value, so we return true to not falsify the conjunction.
-    // If merge input coming from outside the cycle do not depend on the value,
-    // the function's top-level call will still return false
-    return true;
+
+  // The defining operation must be somewhere earlier in the path than before.
+  // We allow the path to "jump over" BBs, since datapaths of optimized circuits
+  // will sometimes skip BBs entirely
+  std::optional<unsigned> defBB = getLogicBB(defOp);
+  if (!defBB)
+    return false;
+  bool foundOnPath = false;
+  for (size_t newIdx = pathIdx + 1; newIdx > 0; --newIdx) {
+    if (path[newIdx - 1] == *defBB) {
+      foundOnPath = true;
+      pathIdx = newIdx - 1;
+      break;
+    }
   }
+  if (!foundOnPath)
+    return false;
 
   // Recursively call the function with a new value as second argument (meant to
-  // be an operand to the defining operation) and adding the defining operation
-  // to the path.
+  // be an operand of the defining operation)
   auto recGIID = [&](Value newVal) -> bool {
-    DenseSet<Operation *> newPath(path);
-    newPath.insert(defOp);
-    return isGIID(dependOn, newVal, newPath);
+    return isGIIDRec(predecessor, newVal, path, pathIdx);
   };
 
   // The backtracking logic depends on the type of the defining operation
@@ -186,8 +191,8 @@ bool dynamatic::isGIID(Value dependOn, Value val,
                    recGIID(condBrOp.getConditionOperand());
           })
       .Case<handshake::MergeOp, handshake::ControlMergeOp>([&](auto) {
-        // All data inputs must depend on the value
-        return llvm::all_of(defOp->getOperands(), [&](Value mergeLikeOprd) {
+        // The data input on the path must depend on the value
+        return llvm::any_of(defOp->getOperands(), [&](Value mergeLikeOprd) {
           return recGIID(mergeLikeOprd);
         });
       })
@@ -196,8 +201,8 @@ bool dynamatic::isGIID(Value dependOn, Value val,
         // the value
         if (recGIID(muxOp.getSelectOperand()))
           return true;
-        // Otherwise, all data inputs must depend on the value
-        return llvm::all_of(defOp->getOperands(), [&](Value mergeLikeOprd) {
+        // Otherwise, the data input on the path must depend on the value
+        return llvm::any_of(defOp->getOperands(), [&](Value mergeLikeOprd) {
           return recGIID(mergeLikeOprd);
         });
       })
@@ -239,4 +244,9 @@ bool dynamatic::isGIID(Value dependOn, Value val,
                             [&](Value oprd) { return recGIID(oprd); });
       })
       .Default([&](auto) { return false; });
+}
+
+bool dynamatic::isGIID(Value predecessor, Value val, CFGPath &path) {
+  assert(path.size() >= 2 && "path must have at least two blocks");
+  return isGIIDRec(predecessor, val, path, path.size() - 1);
 }

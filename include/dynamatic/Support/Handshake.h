@@ -16,6 +16,7 @@
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "dynamatic/Analysis/NameAnalysis.h"
 #include "dynamatic/Support/LLVM.h"
+#include "dynamatic/Support/LogicBB.h"
 
 namespace dynamatic {
 
@@ -90,17 +91,14 @@ SmallVector<Value> getLSQControlPaths(circt::handshake::LSQOp lsqOp,
                                       Operation *ctrlOp);
 
 /// Recursive function that determines whether a value is globally in-order
-/// dependent on another value. In other words, the function answers the
-/// following question: is `dependOn` always (i.e., independently of the path
-/// through the DFG) involved in the determination of `val`?
+/// dependent on another value along a specific CFG path. In other words, the
+/// function answers the following question: is `predecessor` involved in the
+/// determination of `val` in the DFG induced by the CFG path?
 ///
 /// The function achieves this by "bactracking" through the dataflow circuit
-/// (from operations' results to operands) in search for the `dependOn` value.
-/// The backtracking behavior is influenced by the type of the operation
-/// traversed at each step. As it backtracks, the function keeps track of the
-/// set of operations it has crossed on its path to be able to break cycles in
-/// the DFG.
-bool isGIID(Value dependOn, Value val,
-            const mlir::DenseSet<Operation *> &path = {});
+/// (from operations' results to operands) in search for the `predecessor`
+/// value along the DFG induced by the CFG path. The backtracking behavior is
+/// influenced by the type of the operation traversed at each step.
+bool isGIID(Value predecessor, Value val, CFGPath &path);
 
 } // namespace dynamatic

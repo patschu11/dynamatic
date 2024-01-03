@@ -16,6 +16,7 @@
 
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "dynamatic/Support/LLVM.h"
+#include "llvm/ADT/SmallSet.h"
 
 namespace dynamatic {
 
@@ -87,5 +88,22 @@ bool isBackedge(Value val, Operation *user, BBEndpoints *endpoints = nullptr);
 /// Determines whether the value is a backedge. The value must have a single
 /// user (the function will assert if that is not the case).
 bool isBackedge(Value val, BBEndpoints *endpoints = nullptr);
+
+using CFGPath = llvm::SetVector<unsigned>;
+
+class CFG {
+public:
+  CFG(circt::handshake::FuncOp funcOp);
+
+  LogicalResult getDistinctPaths(unsigned from, unsigned to,
+                                 SmallVector<CFGPath> &paths);
+
+private:
+  circt::handshake::FuncOp funcOp;
+  DenseMap<unsigned, llvm::SmallSet<unsigned, 2>> successors;
+
+  void getDistinctPaths(const CFGPath &pathSoFar, unsigned to,
+                        SmallVector<CFGPath> &paths);
+};
 
 } // namespace dynamatic

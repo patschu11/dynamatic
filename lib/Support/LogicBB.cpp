@@ -13,6 +13,7 @@
 
 #include "dynamatic/Support/LogicBB.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Support/LogicalResult.h"
 #include "llvm/ADT/SmallPtrSet.h"
 
 using namespace llvm;
@@ -263,4 +264,66 @@ bool dynamatic::isBackedge(Value val, BBEndpoints *endpoints) {
   assert(std::distance(users.begin(), users.end()) == 1 &&
          "value must have a single user");
   return isBackedge(val, *users.begin(), endpoints);
+}
+
+static bool expectedOutOfCFG(Operation *op) {
+  return isa<handshake::MemoryOpInterface, handshake::SinkOp>(op);
+}
+
+CFG::CFG(circt::handshake::FuncOp funcOp) : funcOp(funcOp) {
+  for (Operation &op : funcOp.getOps()) {
+    if (expectedOutOfCFG(&op))
+      continue;
+
+    // Get the source basic block
+    std::optional<unsigned> srcBB = getLogicBB(&op);
+    assert(srcBB && "source operation must belong to block");
+
+    for (OpResult res : op.getResults()) {
+      for (Operation *user : res.getUsers()) {
+        if (expectedOutOfCFG(user))
+          continue;
+
+        // Get the destination basic block and store the connection
+        std::optional<unsigned> dstBB = getLogicBB(user);
+        assert(dstBB && "destination operation must belong to block");
+        successors[*srcBB].insert(*dstBB);
+      }
+    }
+  }
+}
+
+LogicalResult CFG::getDistinctPaths(unsigned from, unsigned to,
+                                    SmallVector<CFGPath> &paths) {
+  // Both blocks must exist in the CFG
+  if (!successors.contains(from)) {
+    llvm::errs() << "Source block " << from << " does not exist in the CFG\n";
+    return failure();
+  }
+  if (!successors.contains(to)) {
+    llvm::errs() << "Destination block " << to
+                 << " does not exist in the CFG\n";
+    return failure();
+  }
+
+  CFGPath pathSoFar;
+  pathSoFar.insert(from);
+  getDistinctPaths(pathSoFar, to, paths);
+  return success();
+}
+
+// NOLINTNEXTLINE(misc-no-recursion)
+void CFG::getDistinctPaths(const CFGPath &pathSoFar, unsigned to,
+                           SmallVector<CFGPath> &paths) {
+  assert(!pathSoFar.empty() && "path cannot be empty");
+  for (unsigned nextBB : successors[pathSoFar.back()]) {
+    if (nextBB == to) {
+      CFGPath &newPath = paths.emplace_back(pathSoFar);
+      newPath.insert(to);
+    } else if (!pathSoFar.contains(nextBB)) {
+      CFGPath nextPathSoFar(pathSoFar);
+      nextPathSoFar.insert(nextBB);
+      getDistinctPaths(nextPathSoFar, to, paths);
+    }
+  }
 }
