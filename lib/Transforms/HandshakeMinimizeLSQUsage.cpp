@@ -32,8 +32,14 @@ namespace {
 struct MinimizeLSQUsage : public OpRewritePattern<handshake::LSQOp> {
   using OpRewritePattern<handshake::LSQOp>::OpRewritePattern;
 
+  MinimizeLSQUsage(NameAnalysis &namer, MLIRContext *ctx)
+      : OpRewritePattern(ctx), namer(namer){};
+
   LogicalResult matchAndRewrite(handshake::LSQOp lsqOp,
                                 PatternRewriter &rewriter) const override;
+
+private:
+  NameAnalysis &namer;
 };
 
 /// TODO
@@ -74,7 +80,7 @@ struct HandshakeMinimizeLSQUsagePass
 
 static bool hasRAW(handshake::LSQLoadOp loadOp,
                    SetVector<handshake::LSQStoreOp> &storeOps) {
-  std::string loadName = getUniqueName(loadOp);
+  StringRef loadName = getUniqueName(loadOp);
   for (handshake::LSQStoreOp storeOp : storeOps) {
     auto deps = getUniqueAttr<MemDependenceArrayAttr>(storeOp);
     for (MemDependenceAttr dependency : deps.getDependencies()) {
@@ -87,8 +93,24 @@ static bool hasRAW(handshake::LSQLoadOp loadOp,
 
 static bool isStoreGIIDOnLoad(handshake::LSQLoadOp loadOp,
                               handshake::LSQStoreOp storeOp) {
+  // Identify all CFG paths from the block containing the load to the block
+  // containing the store
+  handshake::FuncOp funcOp = loadOp->getParentOfType<handshake::FuncOp>();
+  assert(funcOp && "parent of load access must be handshake function");
+  CFG cfg(funcOp);
+  SmallVector<CFGPath> allPaths;
+  std::optional<unsigned> loadBB = getLogicBB(loadOp);
+  std::optional<unsigned> storeBB = getLogicBB(storeOp);
+  assert(loadBB && storeBB && "memory accesses must belong to blocks");
+  cfg.getDistinctPaths(*loadBB, *storeBB, allPaths);
 
-  return false;
+  // There must be a dependence between any operand of the store with the load
+  // data result on all CFG paths between them
+  Value loadData = loadOp.getDataResult();
+  return llvm::all_of(allPaths, [&](CFGPath &path) {
+    return isGIID(loadData, storeOp.getDataInput(), path) ||
+           isGIID(loadData, storeOp.getAddressResult(), path);
+  });
 }
 
 static bool hasEnforcedWARs(handshake::LSQLoadOp loadOp,
@@ -110,34 +132,59 @@ static bool hasEnforcedWARs(handshake::LSQLoadOp loadOp,
 }
 
 static bool isStoreRemovable(handshake::LSQStoreOp storeOp,
-                             SetVector<StringRef> &independentAccesses) {
+                             DenseSet<StringRef> &independentAccesses) {
   auto deps = getUniqueAttr<MemDependenceArrayAttr>(storeOp);
   return llvm::all_of(
       deps.getDependencies(), [&](MemDependenceAttr dependency) {
-        return independentAccesses.contains(dependency.getDstAccess());
+        return independentAccesses.find(dependency.getDstAccess().str()) !=
+               independentAccesses.end();
       });
+}
+
+static Value getMCControlVal(handshake::MemoryControllerOp mcOp, MCPorts &ports,
+                             unsigned bb) {
+  // Find the basic block
+}
+
+static Value getLSQControlVal(handshake::LSQOp lsqOp, LSQPorts &ports,
+                              unsigned groupIdx) {
+  unsigned ctrlIdx = ports.getGroup(groupIdx)->ctrlPort->getCtrlInputIndex();
+  Value ctrlVal = lsqOp.getMemOperands()[ctrlIdx];
+  Operation *defOp = ctrlVal.getDefiningOp();
+  while (isa_and_present<handshake::ForkOp, handshake::LSQOp>(defOp)) {
+    ctrlVal = defOp->getOperand(0);
+    defOp = ctrlVal.getDefiningOp();
+  }
+  return ctrlVal;
 }
 
 LogicalResult
 MinimizeLSQUsage::matchAndRewrite(handshake::LSQOp lsqOp,
                                   PatternRewriter &rewriter) const {
 
+  // Maps LSQ load and store ports to the index of the group they belong to
+  DenseMap<Operation *, unsigned> lsqPortToGroup;
+
   // Collect loads and stores to the LSQ
   SetVector<handshake::LSQLoadOp> loadOps;
   SetVector<handshake::LSQStoreOp> storeOps;
-  for (LSQGroup &group : lsqOp.getPorts().getGroups()) {
+  for (auto [idx, group] : llvm::enumerate(lsqOp.getPorts().getGroups())) {
     for (MemoryPort &port : group->accessPorts) {
       if (std::optional<LSQLoadPort> loadPort = dyn_cast<LSQLoadPort>(port)) {
-        loadOps.insert(loadPort->getLSQLoadOp());
+        handshake::LSQLoadOp lsqLoadOp = loadPort->getLSQLoadOp();
+        lsqPortToGroup[lsqLoadOp] = idx;
+        loadOps.insert(lsqLoadOp);
       } else if (std::optional<LSQStorePort> storePort =
                      dyn_cast<LSQStorePort>(port)) {
+        handshake::LSQStoreOp lsqStoreOp = storePort->getLSQStoreOp();
+        lsqPortToGroup[lsqStoreOp] = idx;
         storeOps.insert(storePort->getLSQStoreOp());
       }
     }
   }
 
-  // Compute the set of loads that can be removed from the LSQ
-  SetVector<StringRef> removableLoads;
+  // Compute the set of loads that can go directly to an MC inside of an LSQ
+  DenseSet<StringRef> removableLoads;
   for (handshake::LSQLoadOp loadOp : loadOps) {
     // Check for RAW dependencies with the load and for the GIID property
     // between all the stores and the load
@@ -147,13 +194,78 @@ MinimizeLSQUsage::matchAndRewrite(handshake::LSQOp lsqOp,
   if (removableLoads.empty())
     return failure();
 
-  // Compute the set of stores that can be removed from the LSQ now we know that
-  // some loads are out
-  SetVector<StringRef> removableStores;
+  // Compute the set of stores that can go directly to an MC inside of an LSQ
+  // now that we know that some loads are out
+  DenseSet<StringRef> removableStores;
   for (handshake::LSQStoreOp storeOp : storeOps) {
     if (isStoreRemovable(storeOp, removableLoads))
       removableStores.insert(getUniqueName(storeOp));
   }
+
+  // Used to keep track of memory replacements so that dependencies between
+  // accesses stay consistent
+  MemoryOpLowering memOpLowering(namer);
+
+  MLIRContext *ctx = getContext();
+
+  // Group ports of a future MC by basic block
+  llvm::MapVector<unsigned, SmallVector<Operation *>> mcPorts;
+  // Group ports of a future LSQ by group
+  llvm::MapVector<unsigned, SmallVector<Operation *>> lsqPorts;
+  // Count numver of loads to the future MC and LSQ
+  unsigned mcNumLoads = 0, lsqNumLoads = 0;
+
+  // Replace removable LSQ loads with their MC variant
+  for (handshake::LSQLoadOp lsqLoadOp : loadOps) {
+    if (removableLoads.contains(getUniqueName(lsqLoadOp))) {
+      rewriter.setInsertionPoint(lsqLoadOp);
+      auto mcLoadOp = rewriter.create<handshake::MCLoadOp>(
+          lsqLoadOp->getLoc(), lsqLoadOp.getDataInput().getType(),
+          lsqLoadOp.getAddressInput());
+      inheritBB(lsqLoadOp, mcLoadOp);
+
+      // Record operation replacement
+      memOpLowering.recordReplacement(lsqLoadOp, mcLoadOp, false);
+      setUniqueAttr(mcLoadOp, handshake::MemInterfaceAttr::get(ctx));
+
+      // Replace data result (address result will be replaced later, as it goes
+      // to a memory inteface thay is not yet created)
+      rewriter.replaceAllUsesWith(lsqLoadOp.getDataResult(),
+                                  mcLoadOp.getDataResult());
+
+      ++mcNumLoads;
+      mcPorts[*getLogicBB(mcLoadOp)].push_back(mcLoadOp);
+    } else {
+      ++lsqNumLoads;
+      lsqPorts[lsqPortToGroup[lsqLoadOp]].push_back(lsqLoadOp);
+    }
+  }
+
+  // Replace removable LSQ stores with their MC variant
+  for (handshake::LSQStoreOp lsqStoreOp : storeOps) {
+    if (removableStores.contains(getUniqueName(lsqStoreOp))) {
+      rewriter.setInsertionPoint(lsqStoreOp);
+      auto mcStoreOp = rewriter.create<handshake::MCStoreOp>(
+          lsqStoreOp->getLoc(), lsqStoreOp.getAddressInput(),
+          lsqStoreOp.getDataInput());
+      inheritBB(lsqStoreOp, mcStoreOp);
+
+      // Record operation replacement (change interface to MC)
+      memOpLowering.recordReplacement(lsqStoreOp, mcStoreOp, false);
+      setUniqueAttr(mcStoreOp, handshake::MemInterfaceAttr::get(ctx));
+
+      mcPorts[*getLogicBB(mcStoreOp)].push_back(mcStoreOp);
+    } else {
+      lsqPorts[lsqPortToGroup[lsqStoreOp]].push_back(lsqStoreOp);
+    }
+  }
+
+  // Rename memory accesses referenced by memory dependencies attached to the
+  // old and new memory ports
+  memOpLowering.renameDependencies(lsqOp->getParentOp());
+
+  // Retrieve MC attached to the LSQ (may be nullptr)
+  handshake::MemoryControllerOp mcOp = lsqOp.getConnectedMC();
 
   return success();
 }

@@ -98,8 +98,8 @@ class CFG {
 public:
   CFG(circt::handshake::FuncOp funcOp);
 
-  LogicalResult getDistinctPaths(unsigned from, unsigned to,
-                                 SmallVector<CFGPath> &paths);
+  void getDistinctPaths(unsigned from, unsigned to,
+                        SmallVector<CFGPath> &paths);
 
 private:
   circt::handshake::FuncOp funcOp;

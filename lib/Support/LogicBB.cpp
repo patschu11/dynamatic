@@ -293,23 +293,15 @@ CFG::CFG(circt::handshake::FuncOp funcOp) : funcOp(funcOp) {
   }
 }
 
-LogicalResult CFG::getDistinctPaths(unsigned from, unsigned to,
-                                    SmallVector<CFGPath> &paths) {
+void CFG::getDistinctPaths(unsigned from, unsigned to,
+                           SmallVector<CFGPath> &paths) {
   // Both blocks must exist in the CFG
-  if (!successors.contains(from)) {
-    llvm::errs() << "Source block " << from << " does not exist in the CFG\n";
-    return failure();
-  }
-  if (!successors.contains(to)) {
-    llvm::errs() << "Destination block " << to
-                 << " does not exist in the CFG\n";
-    return failure();
-  }
+  assert(successors.contains(from) && "source block must exist in the CFG");
+  assert(successors.contains(to) && "destination block must exist in the CFG");
 
   CFGPath pathSoFar;
   pathSoFar.insert(from);
   getDistinctPaths(pathSoFar, to, paths);
-  return success();
 }
 
 // NOLINTNEXTLINE(misc-no-recursion)
