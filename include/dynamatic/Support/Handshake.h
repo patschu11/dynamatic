@@ -18,8 +18,8 @@
 
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "dynamatic/Analysis/NameAnalysis.h"
+#include "dynamatic/Support/CFG.h"
 #include "dynamatic/Support/LLVM.h"
-#include "dynamatic/Support/LogicBB.h"
 
 namespace dynamatic {
 

@@ -1,4 +1,4 @@
-//===- LogicBB.h - Infrastructure for working with logical BBs --*- C++ -*-===//
+//===- CFG.h - CFG-related analysis and helpers -----------------*- C++ -*-===//
 //
 // Dynamatic is under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,16 +6,21 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file declares the infrastructure useful for handling logical basic
-// blocks (logical BBs) in Handshake functions. These are not basic blocks in
-// the MLIR sense since Handshake function only have a single block. They
-// instead map to the original basic blocks that the std-level IR possessed
-// before conversion to Handshake-level.
+// Contains helpers for CFG-style analysis in Handshake functions. These help in
+// identifying properties of the cf-level CFG within Handshake-level IR.
+//
+// In particular, this file offers ways to interact with the concept of "logical
+// basic blocks" in Handshake functions. These are not basic blocks in the MLIR
+// sense since Handshake function only have a single block. They instead map to
+// the original basic blocks that the cf-level IR possessed before conversion to
+// Handshake-level. Any Handshake operation may optionally have a "bb" integer
+// attribute indicating the basic block it logically belonged to at the
+// cf-level.
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef DYNAMATIC_SUPPORT_LOGICBB_H
-#define DYNAMATIC_SUPPORT_LOGICBB_H
+#ifndef DYNAMATIC_SUPPORT_CFG_H
+#define DYNAMATIC_SUPPORT_CFG_H
 
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "dynamatic/Support/LLVM.h"
@@ -92,23 +97,55 @@ bool isBackedge(Value val, Operation *user, BBEndpoints *endpoints = nullptr);
 /// user (the function will assert if that is not the case).
 bool isBackedge(Value val, BBEndpoints *endpoints = nullptr);
 
+/// Determines whether the Handshake operation cannot belong to the implicit CFG
+/// of a Handshake function (i.e., cannot have a basic block attribute).
+bool cannotBelongToCFG(Operation *op);
+
+/// Represents a CFG path as an ordered sequence of basic blocks with
+/// set semantics.
 using CFGPath = llvm::SetVector<unsigned>;
 
-class CFG {
+/// Oracle into the implicit CFG underlying a Handshake function, which
+/// originates from the explicit CFG of a func-level function. This contains
+/// methods to query properties of the Handshake-level CFG (e.g., paths between
+/// basic blocks, control signals of each block, etc.). In general, it is not
+/// safe to modify the Handshake function an instance of this class refers to
+/// after object creation, as it could break interal invariants of the class.
+class HandshakeCFG {
 public:
-  CFG(circt::handshake::FuncOp funcOp);
+  /// Constructs an instance of the class from a Handshake function. This will
+  /// assert if any operation within the function that can belong to a basic
+  /// block (this excludes memory interfaces and sinks, for example) is not
+  /// annotated with the basic block it logically belongs to.
+  HandshakeCFG(circt::handshake::FuncOp funcOp);
 
-  void getDistinctPaths(unsigned from, unsigned to,
-                        SmallVector<CFGPath> &paths);
+  /// Get all non-cyclic paths between two basic blocks (which may be
+  /// identical). Non-cyclic paths are paths that do not contain the same block
+  /// twice, except maybe in the first and last position. All identified paths
+  /// are appended to the vector.
+  void getNonCyclicPaths(unsigned from, unsigned to,
+                         mlir::SmallVector<CFGPath> &paths);
+
+  /// Identifies the control value of each basic block in the function. Note
+  /// that, currently, this is only guranteed to return a mapping for each basic
+  /// block in the function if there is a control-only merge-like operation at
+  /// the "beginning" of each basic block. Fails if our heuristics cannot
+  /// consistently identify the control value of a particular block. Succeeds
+  /// otherwise (even if the set of mappings is incomplete).
+  LogicalResult getControlValues(DenseMap<unsigned, Value> &ctrlVals);
 
 private:
+  /// The referenced Handshake function.
   circt::handshake::FuncOp funcOp;
-  DenseMap<unsigned, llvm::SmallSet<unsigned, 2>> successors;
+  /// Maps each basic blocks in the function to its successors.
+  mlir::DenseMap<unsigned, llvm::SmallSet<unsigned, 2>> successors;
 
-  void getDistinctPaths(const CFGPath &pathSoFar, unsigned to,
-                        SmallVector<CFGPath> &paths);
+  /// Find all non-cyclic paths from the last block of the path to a destination
+  /// block. All identified paths are appended to the vector.
+  void findPathsTo(const CFGPath &pathSoFar, unsigned to,
+                   mlir::SmallVector<CFGPath> &paths);
 };
 
 } // namespace dynamatic
 
-#endif // DYNAMATIC_SUPPORT_LOGICBB_H
+#endif // DYNAMATIC_SUPPORT_CFG_H

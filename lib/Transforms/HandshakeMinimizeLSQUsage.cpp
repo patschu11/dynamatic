@@ -14,8 +14,8 @@
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "dynamatic/Analysis/NameAnalysis.h"
 #include "dynamatic/Support/Attribute.h"
+#include "dynamatic/Support/CFG.h"
 #include "dynamatic/Support/Handshake.h"
-#include "dynamatic/Support/LogicBB.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Visitors.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -70,7 +70,7 @@ struct HandshakeMinimizeLSQUsagePass
     config.enableRegionSimplification = false;
 
     RewritePatternSet patterns{ctx};
-    patterns.add<MinimizeLSQUsage>(ctx);
+    patterns.add<MinimizeLSQUsage>(namer, ctx);
     if (failed(
             applyPatternsAndFoldGreedily(modOp, std::move(patterns), config)))
       return signalPassFailure();
@@ -92,17 +92,17 @@ static bool hasRAW(handshake::LSQLoadOp loadOp,
 }
 
 static bool isStoreGIIDOnLoad(handshake::LSQLoadOp loadOp,
-                              handshake::LSQStoreOp storeOp) {
+                              handshake::LSQStoreOp storeOp,
+                              HandshakeCFG &cfg) {
   // Identify all CFG paths from the block containing the load to the block
   // containing the store
   handshake::FuncOp funcOp = loadOp->getParentOfType<handshake::FuncOp>();
   assert(funcOp && "parent of load access must be handshake function");
-  CFG cfg(funcOp);
   SmallVector<CFGPath> allPaths;
   std::optional<unsigned> loadBB = getLogicBB(loadOp);
   std::optional<unsigned> storeBB = getLogicBB(storeOp);
   assert(loadBB && storeBB && "memory accesses must belong to blocks");
-  cfg.getDistinctPaths(*loadBB, *storeBB, allPaths);
+  cfg.getNonCyclicPaths(*loadBB, *storeBB, allPaths);
 
   // There must be a dependence between any operand of the store with the load
   // data result on all CFG paths between them
@@ -114,7 +114,8 @@ static bool isStoreGIIDOnLoad(handshake::LSQLoadOp loadOp,
 }
 
 static bool hasEnforcedWARs(handshake::LSQLoadOp loadOp,
-                            SetVector<handshake::LSQStoreOp> &storeOps) {
+                            SetVector<handshake::LSQStoreOp> &storeOps,
+                            HandshakeCFG &cfg) {
   DenseMap<StringRef, handshake::LSQStoreOp> storesByName;
   for (handshake::LSQStoreOp storeOp : storeOps)
     storesByName[getUniqueName(storeOp)] = storeOp;
@@ -125,7 +126,7 @@ static bool hasEnforcedWARs(handshake::LSQLoadOp loadOp,
   auto deps = getUniqueAttr<MemDependenceArrayAttr>(loadOp);
   for (MemDependenceAttr dependency : deps.getDependencies()) {
     handshake::LSQStoreOp storeOp = storesByName[dependency.getDstAccess()];
-    if (!isStoreGIIDOnLoad(loadOp, storeOp))
+    if (!isStoreGIIDOnLoad(loadOp, storeOp, cfg))
       return false;
   }
   return true;
@@ -183,12 +184,15 @@ MinimizeLSQUsage::matchAndRewrite(handshake::LSQOp lsqOp,
     }
   }
 
+  // We will need CFG information about the containing Handshake function
+  HandshakeCFG cfg(lsqOp->getParentOfType<handshake::FuncOp>());
+
   // Compute the set of loads that can go directly to an MC inside of an LSQ
   DenseSet<StringRef> removableLoads;
   for (handshake::LSQLoadOp loadOp : loadOps) {
     // Check for RAW dependencies with the load and for the GIID property
     // between all the stores and the load
-    if (!hasRAW(loadOp, storeOps) && hasEnforcedWARs(loadOp, storeOps))
+    if (!hasRAW(loadOp, storeOps) && hasEnforcedWARs(loadOp, storeOps, cfg))
       removableLoads.insert(getUniqueName(loadOp));
   }
   if (removableLoads.empty())
@@ -206,7 +210,14 @@ MinimizeLSQUsage::matchAndRewrite(handshake::LSQOp lsqOp,
   // accesses stay consistent
   MemoryOpLowering memOpLowering(namer);
 
+  // Context for creating new operation
   MLIRContext *ctx = getContext();
+
+  // We need the control value of each block in the Handshake function to be
+  // able to recreate memory interfaces
+  DenseMap<unsigned, Value> ctrlVals;
+  if (failed(cfg.getControlValues(ctrlVals)))
+    return failure();
 
   // Group ports of a future MC by basic block
   llvm::MapVector<unsigned, SmallVector<Operation *>> mcPorts;
