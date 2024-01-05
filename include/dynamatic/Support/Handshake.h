@@ -67,6 +67,63 @@ private:
   llvm::StringMap<std::string> nameChanges;
 };
 
+class MemoryInterfaceBuilder {
+public:
+  MemoryInterfaceBuilder(circt::handshake::FuncOp funcOp, Value memref,
+                         const DenseMap<unsigned, Value> &ctrlVals)
+      : funcOp(funcOp), memref(memref), ctrlVals(ctrlVals){};
+
+  void addMCPort(unsigned block, Operation *memOp);
+
+  void addLSQPort(unsigned group, Operation *memOp);
+
+  LogicalResult
+  instantiateInterfaces(mlir::PatternRewriter &rewriter,
+                        circt::handshake::MemoryControllerOp &mcOp,
+                        circt::handshake::LSQOp &lsqOp);
+
+  /// Returns load/store results which are to be given as operands to a memory
+  /// interface.
+  static SmallVector<Value, 2> getMemResultsToInterface(Operation *memOp);
+
+  /// For simple memory controllers the control signal is fed through a constant
+  /// indicating the number of stores in the block (to eventually indicate block
+  /// completion to the end node). Returns that constant signal.
+  static Value getMCControl(Value ctrl, unsigned numStores,
+                            PatternRewriter &rewriter);
+
+  /// Adds the data input (from memory interface) to the list of load operands.
+  static void setLoadDataOperand(circt::handshake::LoadOpInterface loadOp,
+                                 Value dataIn);
+
+private:
+  struct InterfaceInputs {
+    SmallVector<Value> mcInputs;
+    SmallVector<unsigned> mcBlocks;
+    SmallVector<Value> lsqInputs;
+    SmallVector<unsigned> lsqGroupSizes;
+  };
+
+  using InterfacePorts = llvm::MapVector<unsigned, SmallVector<Operation *>>;
+
+  circt::handshake::FuncOp funcOp;
+  Value memref;
+  DenseMap<unsigned, Value> ctrlVals;
+
+  InterfacePorts mcPorts;
+  unsigned mcNumLoads;
+
+  InterfacePorts lsqPorts;
+  unsigned lsqNumLoads;
+
+  LogicalResult determineInterfaceInputs(InterfaceInputs &inputs,
+                                         mlir::PatternRewriter &rewriter);
+
+  Value getCtrl(unsigned block);
+
+  void addMemDataResultToLoads(InterfacePorts &ports, Operation *memIfaceOp);
+};
+
 /// Determines whether the given value has any "real" use i.e., a use which is
 /// not the operand of a sink. If this function returns false for a given value
 /// and one decides to erase the operation that defines it, one should keep in
