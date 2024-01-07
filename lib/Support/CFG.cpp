@@ -14,6 +14,7 @@
 #include "circt/Dialect/Handshake/HandshakeOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Support/LogicalResult.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include <queue>
@@ -289,7 +290,8 @@ HandshakeCFG::HandshakeCFG(circt::handshake::FuncOp funcOp) : funcOp(funcOp) {
         // Get the destination basic block and store the connection
         std::optional<unsigned> dstBB = getLogicBB(user);
         assert(dstBB && "destination operation must belong to block");
-        successors[*srcBB].insert(*dstBB);
+        if (*srcBB != *dstBB || isBackedge(res, user))
+          successors[*srcBB].insert(*dstBB);
       }
     }
   }
@@ -301,7 +303,7 @@ void HandshakeCFG::getNonCyclicPaths(unsigned from, unsigned to,
   assert(successors.contains(from) && "source block must exist in the CFG");
   assert(successors.contains(to) && "destination block must exist in the CFG");
 
-  CFGPath pathSoFar;
+  mlir::SetVector<unsigned> pathSoFar;
   pathSoFar.insert(from);
   findPathsTo(pathSoFar, to, paths);
 }
@@ -377,15 +379,16 @@ HandshakeCFG::getControlValues(DenseMap<unsigned, Value> &ctrlVals) {
 }
 
 // NOLINTNEXTLINE(misc-no-recursion)
-void HandshakeCFG::findPathsTo(const CFGPath &pathSoFar, unsigned to,
-                               SmallVector<CFGPath> &paths) {
+void HandshakeCFG::findPathsTo(const mlir::SetVector<unsigned> &pathSoFar,
+                               unsigned to, SmallVector<CFGPath> &paths) {
   assert(!pathSoFar.empty() && "path cannot be empty");
   for (unsigned nextBB : successors[pathSoFar.back()]) {
     if (nextBB == to) {
-      CFGPath &newPath = paths.emplace_back(pathSoFar);
-      newPath.insert(to);
+      CFGPath newPath;
+      llvm::copy(pathSoFar, std::back_inserter(newPath));
+      newPath.push_back(to);
     } else if (!pathSoFar.contains(nextBB)) {
-      CFGPath nextPathSoFar(pathSoFar);
+      mlir::SetVector<unsigned> nextPathSoFar(pathSoFar);
       nextPathSoFar.insert(nextBB);
       findPathsTo(nextPathSoFar, to, paths);
     }

@@ -101,9 +101,8 @@ bool isBackedge(Value val, BBEndpoints *endpoints = nullptr);
 /// of a Handshake function (i.e., cannot have a basic block attribute).
 bool cannotBelongToCFG(Operation *op);
 
-/// Represents a CFG path as an ordered sequence of basic blocks with
-/// set semantics.
-using CFGPath = llvm::SetVector<unsigned>;
+/// Represents a CFG path as an ordered sequence of basic blocks.
+using CFGPath = mlir::SmallVector<unsigned>;
 
 /// Oracle into the implicit CFG underlying a Handshake function, which
 /// originates from the explicit CFG of a func-level function. This contains
@@ -142,7 +141,7 @@ private:
 
   /// Find all non-cyclic paths from the last block of the path to a destination
   /// block. All identified paths are appended to the vector.
-  void findPathsTo(const CFGPath &pathSoFar, unsigned to,
+  void findPathsTo(const mlir::SetVector<unsigned> &pathSoFar, unsigned to,
                    mlir::SmallVector<CFGPath> &paths);
 };
 

@@ -73,7 +73,7 @@ public:
                          const DenseMap<unsigned, Value> &ctrlVals)
       : funcOp(funcOp), memref(memref), ctrlVals(ctrlVals){};
 
-  void addMCPort(unsigned block, Operation *memOp);
+  void addMCPort(Operation *memOp);
 
   void addLSQPort(unsigned group, Operation *memOp);
 
@@ -111,10 +111,10 @@ private:
   DenseMap<unsigned, Value> ctrlVals;
 
   InterfacePorts mcPorts;
-  unsigned mcNumLoads;
+  unsigned mcNumLoads = 0;
 
   InterfacePorts lsqPorts;
-  unsigned lsqNumLoads;
+  unsigned lsqNumLoads = 0;
 
   LogicalResult determineInterfaceInputs(InterfaceInputs &inputs,
                                          mlir::PatternRewriter &rewriter);
@@ -159,7 +159,7 @@ SmallVector<Value> getLSQControlPaths(circt::handshake::LSQOp lsqOp,
 /// (from operations' results to operands) in search for the `predecessor`
 /// value along the DFG induced by the CFG path. The backtracking behavior is
 /// influenced by the type of the operation traversed at each step.
-bool isGIID(Value predecessor, Value val, CFGPath &path);
+bool isGIID(Value predecessor, Value val, Operation *defOp, CFGPath &path);
 
 } // namespace dynamatic
 

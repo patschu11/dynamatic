@@ -354,10 +354,9 @@ LogicalResult HandshakeLoweringFPGA18::verifyAndCreateMemInterfaces(
                                       memref, ctrlVals);
 
     // Add MC ports to the interface builder
-    for (auto [block, mcBlockOps] : memAccesses.mcPorts) {
-      unsigned blockIdx = getBlockNumber(block);
+    for (auto [_, mcBlockOps] : memAccesses.mcPorts) {
       for (Operation *mcOp : mcBlockOps)
-        memBuilder.addMCPort(blockIdx, mcOp);
+        memBuilder.addMCPort(mcOp);
     }
 
     // Determine LSQ group validity and add ports the the interface builder at
