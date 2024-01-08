@@ -121,8 +121,8 @@ static bool isStoreGIIDOnLoad(handshake::LSQLoadOp loadOp,
   // data result on all CFG paths between them
   Value loadData = loadOp.getDataResult();
   return llvm::all_of(allPaths, [&](CFGPath &path) {
-    return isGIID(loadData, storeOp.getDataInput(), storeOp, path) ||
-           isGIID(loadData, storeOp.getAddressResult(), storeOp, path);
+    return isGIID(loadData, storeOp->getOpOperand(0), path) ||
+           isGIID(loadData, storeOp->getOpOperand(1), path);
   });
 }
 
@@ -161,14 +161,10 @@ static bool isStoreRemovable(handshake::LSQStoreOp storeOp,
 
 LogicalResult OptimizeLSQ::matchAndRewrite(handshake::LSQOp lsqOp,
                                            PatternRewriter &rewriter) const {
-  llvm::errs() << "Calling opt pattern\n";
   // Check whether the LSQ is optimizable
   LSQInfo lsqInfo(lsqOp);
   if (!lsqInfo.optimizable)
     return failure();
-
-  llvm::errs() << "Removing " << lsqInfo.removableLoads.size() << " loads and "
-               << lsqInfo.removableStores.size() << " stores\n";
 
   // Context for creating new operation
   MLIRContext *ctx = getContext();
@@ -199,6 +195,9 @@ LogicalResult OptimizeLSQ::matchAndRewrite(handshake::LSQOp lsqOp,
   for (Operation &op : llvm::make_early_inc_range(funcOp.getOps())) {
     llvm::TypeSwitch<Operation *, void>(&op)
         .Case<handshake::LSQLoadOp>([&](handshake::LSQLoadOp lsqLoadOp) {
+          if (!lsqInfo.lsqLoadOps.contains(lsqLoadOp))
+            return;
+
           if (!lsqInfo.removableLoads.contains(getUniqueName(lsqLoadOp))) {
             memBuilder.addLSQPort(lsqInfo.lsqPortToGroup[lsqLoadOp], lsqLoadOp);
             return;
@@ -224,6 +223,9 @@ LogicalResult OptimizeLSQ::matchAndRewrite(handshake::LSQOp lsqOp,
           rewriter.eraseOp(lsqLoadOp);
         })
         .Case<handshake::LSQStoreOp>([&](handshake::LSQStoreOp lsqStoreOp) {
+          if (!lsqInfo.lsqStoreOps.contains(lsqStoreOp))
+            return;
+
           if (!lsqInfo.removableStores.contains(getUniqueName(lsqStoreOp))) {
             memBuilder.addLSQPort(lsqInfo.lsqPortToGroup[lsqStoreOp],
                                   lsqStoreOp);
@@ -285,23 +287,11 @@ LogicalResult OptimizeLSQ::matchAndRewrite(handshake::LSQOp lsqOp,
     Value loadDataToLSQ = mcOp.getResult(mcOp.getNumResults() - 2);
     rewriter.replaceAllUsesWith(loadDataToLSQ,
                                 backedgeBuilder.get(loadDataToLSQ.getType()));
-
-    for (OpResult res : mcOp.getResults()) {
-      llvm::errs() << "MC res has "
-                   << std::distance(res.getUses().begin(), res.getUses().end())
-                   << " uses\n";
-      for (Operation *user : res.getUsers())
-        user->emitRemark();
-    }
     rewriter.eraseOp(mcOp);
   }
-  for (OpResult res : lsqOp.getResults())
-    llvm::errs() << "LSQ res has "
-                 << std::distance(res.getUses().begin(), res.getUses().end())
-                 << " uses\n";
 
+  // Now we can safely delete the original LSQ
   rewriter.eraseOp(lsqOp);
-  llvm::errs() << "Optimized!\n";
   return success();
 }
 

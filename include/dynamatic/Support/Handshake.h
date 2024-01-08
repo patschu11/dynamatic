@@ -150,16 +150,16 @@ void eraseSinkUsers(Value val, PatternRewriter &rewriter);
 SmallVector<Value> getLSQControlPaths(circt::handshake::LSQOp lsqOp,
                                       Operation *ctrlOp);
 
-/// Recursive function that determines whether a value is globally in-order
-/// dependent on another value along a specific CFG path. In other words, the
-/// function answers the following question: is `predecessor` involved in the
-/// determination of `val` in the DFG induced by the CFG path?
+/// Recursive function that determines whether an operand is globally in-order
+/// dependent on another value (the predecessor) along a specific CFG path. In
+/// other words, the function answers the following question: is `predecessor`
+/// involved in the determination of `oprd` in the DFG induced by the CFG path?
 ///
 /// The function achieves this by "bactracking" through the dataflow circuit
 /// (from operations' results to operands) in search for the `predecessor`
 /// value along the DFG induced by the CFG path. The backtracking behavior is
 /// influenced by the type of the operation traversed at each step.
-bool isGIID(Value predecessor, Value val, Operation *defOp, CFGPath &path);
+bool isGIID(Value predecessor, OpOperand &oprd, CFGPath &path);
 
 } // namespace dynamatic
 

@@ -135,16 +135,6 @@ static SmallVector<Value, 8> getFunctionEndControls(Region &r) {
   return controls;
 }
 
-/// Returns the index of the block in its enclosing region (its position in the
-/// region's block list).
-static unsigned getBlockNumber(Block *block) {
-  for (auto [idx, blockIt] : llvm::enumerate(block->getParent()->getBlocks())) {
-    if (&blockIt == block)
-      return idx;
-  }
-  llvm_unreachable("block does not exist");
-}
-
 /// Checks whether the blocks in `opsPerBlock`'s keys exhibit a "linear
 /// dominance relationship" i.e., whether the execution of the "most dominant"
 /// block necessarily triggers the execution of all others in a deterministic
