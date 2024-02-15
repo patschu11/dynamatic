@@ -52,7 +52,7 @@ export_dot() {
 
   # Export to DOT
   "$DYNAMATIC_EXPORT_DOT_BIN" "$F_HANDSHAKE_EXPORT" "--mode=$mode" \
-      "--edge-style=spline" \
+      "--edge-style=ortho" \
       "--timing-models=$DYNAMATIC_DIR/data/components.json" \
       > "$f_dot"
   exit_on_fail "Failed to create $2 DOT" "Created $2 DOT"
@@ -154,7 +154,7 @@ else
   cd "$COMP_DIR"
   "$DYNAMATIC_OPT_BIN" "$F_HANDSHAKE_TRANSFORMED" \
     --handshake-set-buffering-properties="version=fpga20" \
-    --handshake-place-buffers="algorithm=fpl22 frequencies=$F_FREQUENCIES timing-models=$DYNAMATIC_DIR/data/components.json timeout=300 dump-logs" \
+    --handshake-place-buffers="algorithm=fpga20 frequencies=$F_FREQUENCIES timing-models=$DYNAMATIC_DIR/data/components.json timeout=300 dump-logs target-period=20" \
     > "$F_HANDSHAKE_BUFFERED"
   exit_on_fail "Failed to place smart buffers" "Placed smart buffers"
   cd - > /dev/null
