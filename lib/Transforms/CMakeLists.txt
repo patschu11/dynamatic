@@ -1,4 +1,5 @@
 add_dynamatic_library(DynamaticTransforms
+  HandshakeMuxToMerge.cpp
   ArithReduceStrength.cpp
   BackAnnotate.cpp
   FlattenMemRefRowMajor.cpp

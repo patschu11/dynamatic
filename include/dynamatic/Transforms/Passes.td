@@ -16,6 +16,13 @@
 include "mlir/Pass/PassBase.td"
 include "dynamatic/Support/Passes.td"
 
+def HandshakeMuxToMerge : DynamaticPass<"handshake-mux-to-merge"> {
+  let summary = "Transform all muxes into merges.";
+  let description = [{
+    Transform all muxes within the IR into merges with identical data operands. 
+  }];
+  let constructor = "dynamatic::createHandshakeMuxToMerge()";
+}
 
 //===----------------------------------------------------------------------===//
 // Arith passes
