@@ -70,7 +70,7 @@ Done! The pass has been added to the list of IR transformations Dynamatic perfor
 > ```sh
 > ./bin/dynamatic --run tutorials/Introduction/Ch2/loop-accumulate.dyh
 > # Frontend output here
-> ./bin/dataflow-visualizer
+> ./bin/visual-dataflow
 > ```
 
 Notice that all muxes have been turned into merges, as expected.
