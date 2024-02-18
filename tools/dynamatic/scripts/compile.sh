@@ -117,7 +117,9 @@ exit_on_fail "Failed to apply Dynamatic transformations to cf" \
 exit_on_fail "Failed to compile cf to handshake" "Compiled cf to handshake"
 
 # handshake transformations
-"$DYNAMATIC_OPT_BIN" "$F_HANDSHAKE" \
+HANDSHAKE_MUX_TO_MERGE=""
+# HANDSHAKE_MUX_TO_MERGE=" --handshake-mux-to-merge "
+"$DYNAMATIC_OPT_BIN" "$F_HANDSHAKE" $HANDSHAKE_MUX_TO_MERGE \
   --handshake-minimize-lsq-usage \
   --handshake-concretize-index-type="width=32" \
   --handshake-minimize-cst-width --handshake-optimize-bitwidths="legacy" \
