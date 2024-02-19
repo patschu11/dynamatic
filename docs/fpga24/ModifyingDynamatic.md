@@ -14,7 +14,7 @@ In this second exercise, we write a small compiler optimization pass in C++ that
 
 ## Spotting an optimization opportunity
 
-Re-consider the [same `loop_accumulate` kernel](../../tutorials/Introduction/Ch1/loop_accumulate.c) from the previous exercise. See its definition below.
+Consider again the [same `loop_accumulate` kernel](../../tutorials/Introduction/Ch1/loop_accumulate.c) from the previous exercise. See its definition below.
 
 ```c
 unsigned loop_accumulate(in_int_t a[N]) {
