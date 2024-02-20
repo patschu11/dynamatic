@@ -141,6 +141,46 @@ We are especially interested in the store's data input, since it is the one feed
 > [!TIP]
 > Once you have identified the store's data input and the first cycle at which it transfers a token to the memory controller, backtrack through cycles to see where the data token came from. You should notice something that should not be happening there. Remember that this is the first time the store transmits to the memory so the data token is supposed to come from the multiplier (`mul1`) since `a[0] := 0` at the beginning. Also remember that the issue must ultimately come from a merge, since those are the only components we modified with our pass.
 
+## (Optional) Fixing the circuit manually
+
+Let's verify that we are correct by modifying manually the IR that ultimately gets transformed into the dataflow circuit and re-simulating. We will turn back the problematic merge we identified previously into a mux.
+
+> [!IMPORTANT]
+> Open the `tutorials/Introduction/Ch2/out/comp/handshake_export.mlir` MLIR file. On line 31, you should see the following.
+> ```mlir
+> %23 = merge %22, %16 {bb = 3 : ui32, name = #handshake.name<"merge10">} : i10
+> ```
+> As the `name` operation attribute indicates, this is the faulty `merge10` we identified in the visualizer. Replace the entire line with an equivalent mux.
+> ```mlir
+> %23 = mux %muxIndex [%22, %16] {bb = 3 : ui32, name = #handshake.name<"my_mux">} : i1, i10
+> ```
+
+Before the square brackets is the mux's `select` operand: `%muxIndex`. This SSA value currently does not exist in the IR, since it used to come from block 3's control merge that has since then been downgraded to a simple merge due to its `index` output becoming unused.
+
+> [!IMPORTANT]
+> Upgrade the merge back into a control merge; it is located on line 40.
+> ```mlir
+> %32 = merge %trueResult_2, %falseResult_3 {bb = 3 : ui32, name = #handshake.name<"merge2">} : none
+> ```
+> Replace it with 
+> ```mlir
+> %32, %muxIndex = control_merge %trueResult_2, %falseResult_3 {bb = 3 : ui32, name = #handshake.name<"my_control_merge">} : none, i1
+> ```
+
+And done! We provide a little shell script that will only run the part of the synthesis flow that comes after this file is generated. It will regenerate the VHDL design from the MLIR file, simulate it, and prepare data for the visualizer.
+
+> [!IMPORTANT]
+> From Dynamatic's top-level folder, run the provided shell script.
+> ```sh
+> ./tutorials/Introduction/Ch2/partial-flow.sh
+> ```
+
+You should now see that simulation succeeds!
+
+> [!TIP]
+> Re-open the visualizer and study the fixed circuit to confirm that a mux is indeed necessary to ensure proper ordering of data tokens to the store port. 
+
+
 ## Conclusion
 
 As we just saw, our pass does not work in every situation. While it is possible to replace some muxes by merges when there is no risk of token re-ordering, this is not true in general for all merges. You would need to design a proper strategy to identify which muxes can be transformed into simpler merges and which are necessary to ensure correct circuit behavior. If you are interested, come to see Aya's talk in the coming days where she argues that it can be very useful in some cases to give up on order and put merges anyway--but then it is important to fix the rest of the circuit, lest you get the wrong result as we saw.
