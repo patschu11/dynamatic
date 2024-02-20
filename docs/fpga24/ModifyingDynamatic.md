@@ -80,7 +80,7 @@ Notice that all muxes have been turned into merges, as expected.
 
 Surely this will work on all circuits, which will from now on all be smaller than before, right? 
 
-## A problem, and a solution!
+## A problem
 
 Just to be sure, let's try our optimization on a different yet similar C kernel called [`loop_store`](../../tutorials/Introduction/Ch2/loop_store.c).
 
