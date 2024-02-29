@@ -142,7 +142,7 @@ In the last section of this exercise, we will take a closer look at the actual c
 ## Visualizing the resulting dataflow circuit
 
 > [!IMPORTANT]
-> To generate the information needed by the visualizer, re-open the frontend, re-set the source, then input the `visualize` command.
+> To open the dataflow visualizer, re-open the frontend with `./bin/dynamatic`, re-set the source with `set-src tutorials/Introduction/Ch1/loop_accumulate.c`, and input the `visualize` command.
 > ```
 > $ ./bin/dynamatic
 > ================================================================================
@@ -159,19 +159,6 @@ In the last section of this exercise, we will take a closer look at the actual c
 > 
 > Goodbye!
 > ```
-
-Intermediate and final results of `visualize` are stored in `tutorials/Introduction/Ch1/out/visual/`.
-
-> [!IMPORTANT]
-> Launch the dataflow visualizer from Dynamatic's top-level folder.
-> ```sh
-> ./bin/visual-dataflow
-> ```
-
-On the main menu, the visualizer prompts you to indicate the path to a DOT file and a CSV file to render the visualization.
-
-> [!IMPORTANT]
-> Select each file by clicking on each corresponding button in the visualizer's menu and navigating to it in the file explorer that pops up. The DOT and CSV files are located, respetively, at `tutorials/Introduction/Ch1/out/visual/loop_accumulate.dot` and `tutorials/Introduction/Ch1/out/visual/sim.csv`.
 
 You should now see a visual representation of the dataflow circuit you just synthesized. In this example, the original source code had 5 basic blocks, which are transcribed here in 5 labeled rectangular boxes. Two of these basic blocks represent the start and end of the kernel before and after the loop, respectively. The other 3 hold the loop's logic.
 
