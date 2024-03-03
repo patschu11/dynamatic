@@ -14,14 +14,14 @@ This first exercise walks you through the compilation of a simple kernel functio
 
 ## The source code
 
-In this tutorial, we will tranform the following C function (the *kernel*, in DHLS jargon) into a dataflow circuit (source available [here](../../tutorials/Introduction/Ch1/loop_accumulate.c)).
+In this tutorial, we will tranform the following C function (the *kernel*, in DHLS jargon) into a dataflow circuit (source available [here](../../tutorials/Introduction/Ch1/loop_multiply.c)).
 
 ```c
 // The number of loop iterations
-#define N 10
+#define N 8
 
 // The kernel under consideration
-unsigned loop_accumulate(in_int_t a[N]) {
+unsigned loop_multiply(in_int_t a[N]) {
   unsigned x = 2;
   for (unsigned i = 0; i < N; ++i) {
     if (a[i] == 0)
@@ -31,13 +31,13 @@ unsigned loop_accumulate(in_int_t a[N]) {
 }
 ```
 
-This simple kernel multiplies a number by itself at each iteration of a simple loop from 0 to any number `N` where the corresponding element of an array equals 0. The function returns the accumulated value after the loop exits.
+This simple kernel multiplies a number by itself at each iteration of a simple loop from 0 to any number `N` where the corresponding element of an array equals 0. The function returns the calculated value after the loop exits.
 
 ## Using Dynamatic's frontend
 
 ### Interactive mode
 
-We will now use Dynamatic's frontend in interactive mode to compile the `loop_accumulate` kernel into a VHDL design in a couple of simple commands. 
+We will now use Dynamatic's frontend in interactive mode to compile the `loop_multiply` kernel into a VHDL design in a couple of simple commands. 
 
 > [!IMPORTANT]
 > In a terminal, from Dynamatic's top-level folder, run the following.
@@ -56,13 +56,13 @@ This will print the frontend's header and display a prompt where you can start i
 dynamatic> # Input your command here
 ```
 
-First, we must provide the frontend with the path to the C source file under consideration. Ours is located at [`tutorials/Introduction/Ch1/loop_accumulate.c`](../../tutorials/Introduction/Ch1/loop_accumulate.c).
+First, we must provide the frontend with the path to the C source file under consideration. Ours is located at [`tutorials/Introduction/Ch1/loop_multiply.c`](../../tutorials/Introduction/Ch1/loop_multiply.c).
 
 
 > [!IMPORTANT]
 > Set the source by inputting the following `set-src <path>` command into the frontend.
 > ```
-> dynamatic> set-src tutorials/Introduction/Ch1/loop_accumulate.c
+> dynamatic> set-src tutorials/Introduction/Ch1/loop_multiply.c
 > ```
 
 The first processing step is compilation, which will transform the C kernel into a low-level IR representation that we can later export to VHDL.
@@ -87,8 +87,8 @@ The first processing step is compilation, which will transform the C kernel into
 > [INFO] Canonicalized handshake
 > [INFO] Created visual DOT
 > [INFO] Converted visual DOT to PNG
-> [INFO] Created loop_accumulate DOT
-> [INFO] Converted loop_accumulate DOT to PNG
+> [INFO] Created loop_multiply DOT
+> [INFO] Converted loop_multiply DOT to PNG
 > [INFO] Compilation succeeded
 > ```
 
@@ -142,7 +142,7 @@ In the last section of this exercise, we will take a closer look at the actual c
 ## Visualizing the resulting dataflow circuit
 
 > [!IMPORTANT]
-> To open the dataflow visualizer, re-open the frontend with `./bin/dynamatic`, re-set the source with `set-src tutorials/Introduction/Ch1/loop_accumulate.c`, and input the `visualize` command.
+> To open the dataflow visualizer, re-open the frontend with `./bin/dynamatic`, re-set the source with `set-src tutorials/Introduction/Ch1/loop_multiply.c`, and input the `visualize` command.
 > ```
 > $ ./bin/dynamatic
 > ================================================================================
@@ -150,7 +150,7 @@ In the last section of this exercise, we will take a closer look at the actual c
 > ==================== EPFL-LAP - <release> | <release-date> =====================
 > ================================================================================
 > 
-> dynamatic> set-src tutorials/Introduction/Ch1/loop_accumulate.c
+> dynamatic> set-src tutorials/Introduction/Ch1/loop_multiply.c
 > dynamatic> visualize
 > [INFO] Generated channel changes
 > [INFO] Added positioning info. to DOT
