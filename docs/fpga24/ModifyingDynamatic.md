@@ -10,7 +10,10 @@ Throughout the exercise, you will see the following two types of blocks.
 > [!TIP]
 > *Tip* blocks indicate something that you should spend some time exploring on your own to better understand the exercise's content.
 
-In this second exercise, we write a small compiler optimization pass in C++ that transforms dataflow muxes into merges in an attempt to optimize our circuits' area and throughput. We will again use the dataflow visualizer to profile and then debug our circuits. 
+In this second exercise, we write a small compiler optimization pass in C++ that transforms dataflow muxes into merges in an attempt to optimize our circuits' area and throughput. We will again use the dataflow visualizer to profile and then debug our circuits.
+
+> [!IMPORTANT]
+> All commands for this exercise should be ran from Dynamatic's top-level folder, located at `/home/dynamatic/dynamatic` in the provided virtual machine. You can either use VSCode's integrated terminal, which already opens at the correct location, or open a terminal yourself by clicking the "terminal icon" at the top left of Ubuntu's menu and typing `cd dynamatic` inside of it.   
 
 ## Spotting an optimization opportunity
 

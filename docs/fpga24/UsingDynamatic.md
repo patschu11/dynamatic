@@ -12,6 +12,9 @@ Throughout the exercise, you will see the following two types of blocks.
 
 This first exercise walks you through the compilation of a simple kernel function written in C into an equivalent VHDL design, the functional verification of the resulting dataflow circuit using Modelsim, and the latter's visualization using our custom interactive dataflow visualizer. 
 
+> [!IMPORTANT]
+> All commands for this exercise should be ran from Dynamatic's top-level folder, located at `/home/dynamatic/dynamatic` in the provided virtual machine. You can either use VSCode's integrated terminal, which already opens at the correct location, or open a terminal yourself by clicking the "terminal icon" at the top left of Ubuntu's menu and typing `cd dynamatic` inside of it.   
+
 ## The source code
 
 In this tutorial, we will tranform the following C function (the *kernel*, in DHLS jargon) into a dataflow circuit (source available [here](../../tutorials/Introduction/Ch1/loop_multiply.c)).
