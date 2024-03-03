@@ -136,13 +136,13 @@ Let's verify that we are correct by modifying manually the IR that ultimately ge
 > [!IMPORTANT]
 > Open the `tutorials/Introduction/Ch2/out/comp/handshake_export.mlir` MLIR file and locate the MLIR operation named `merge10`. It should look like the following.
 > ```mlir
-> %<dataResult> = merge %<dataOperand1>, %<dataOperand2> {bb = 3 : ui32, name = #handshake.name<"merge10">} : i10
+> %<dataResult> = merge %<dataOperand1>, %<dataOperand2> {bb = 3 : ui32, name = #handshake.name<"merge10">} : i8
 > ```
 > As the `name` operation attribute indicates, this is the faulty `merge10` we identified in the visualizer. `%<dataOperand1>` and `%<dataOperand2>` are placeholder names for the two SSA values that make up the merge's inputs, while `%<dataResult>` is a placeholder name for the merge's single output.
 > 
 > Replace the entire line with an equivalent mux, substituting the placeholder names with the same ones the merge had. 
 > ```mlir
-> %<dataResult> = mux %muxIndex [%<dataOperand1>, %<dataOperand2>] {bb = 3 : ui32, name = #handshake.name<"my_mux">} : i1, i10
+> %<dataResult> = mux %muxIndex [%<dataOperand1>, %<dataOperand2>] {bb = 3 : ui32, name = #handshake.name<"my_mux">} : i1, i8
 > ```
 
 Before the square brackets is the mux's `select` operand: `%muxIndex`. This SSA value currently does not exist in the IR, since it used to come from block 3's control merge that has since then been downgraded to a simple merge due to its `index` output becoming unused.
