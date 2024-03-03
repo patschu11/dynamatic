@@ -63,7 +63,7 @@ Done! The pass has been added to the list of IR transformations Dynamatic perfor
 > [!IMPORTANT]
 > Now re-run the same frontend script as before to see the updated circuit. 
 > ```sh
-> ./bin/dynamatic --run tutorials/Introduction/Ch2/loop-accumulate.dyh
+> ./bin/dynamatic --run tutorials/Introduction/Ch2/loop-accumulate.dyn
 > ```
 
 Notice that all muxes have been turned into merges, as expected.
@@ -131,25 +131,29 @@ We are especially interested in the store's data input, since it is the one feed
 Let's verify that we are correct by modifying manually the IR that ultimately gets transformed into the dataflow circuit and re-simulating. We will turn back the problematic merge we identified previously into a mux.
 
 > [!IMPORTANT]
-> Open the `tutorials/Introduction/Ch2/out/comp/handshake_export.mlir` MLIR file. On line 31, you should see the following.
+> Open the `tutorials/Introduction/Ch2/out/comp/handshake_export.mlir` MLIR file and locate the MLIR operation named `merge10`. It should look like the following.
 > ```mlir
-> %23 = merge %22, %16 {bb = 3 : ui32, name = #handshake.name<"merge10">} : i10
+> %<dataResult> = merge %<dataOperand1>, %<dataOperand2> {bb = 3 : ui32, name = #handshake.name<"merge10">} : i10
 > ```
-> As the `name` operation attribute indicates, this is the faulty `merge10` we identified in the visualizer. Replace the entire line with an equivalent mux.
+> As the `name` operation attribute indicates, this is the faulty `merge10` we identified in the visualizer. `%<dataOperand1>` and `%<dataOperand2>` are placeholder names for the two SSA values that make up the merge's inputs, while `%<dataResult>` is a placeholder name for the merge's single output.
+> 
+> Replace the entire line with an equivalent mux, substituting the placeholder names with the same ones the merge had. 
 > ```mlir
-> %23 = mux %muxIndex [%22, %16] {bb = 3 : ui32, name = #handshake.name<"my_mux">} : i1, i10
+> %<dataResult> = mux %muxIndex [%<dataOperand1>, %<dataOperand2>] {bb = 3 : ui32, name = #handshake.name<"my_mux">} : i1, i10
 > ```
 
 Before the square brackets is the mux's `select` operand: `%muxIndex`. This SSA value currently does not exist in the IR, since it used to come from block 3's control merge that has since then been downgraded to a simple merge due to its `index` output becoming unused.
 
 > [!IMPORTANT]
-> Upgrade the merge back into a control merge; it is located on line 40.
+> Upgrade the merge back into a control merge. First locate the MLIR operation named `merge2`. It should look like the following.
 > ```mlir
-> %32 = merge %trueResult_2, %falseResult_3 {bb = 3 : ui32, name = #handshake.name<"merge2">} : none
+> %<controlResult> = merge %<controlOperand1>, %<controlOperand2> {bb = 3 : ui32, name = #handshake.name<"merge2">} : none
 > ```
-> Replace it with 
+> Similarly than before, `%<controlOperand1>` and `%<controlOperand2>` are placeholder names for the two SSA values that make up this merge's inputs, while `%<controlResult>` is a placeholder name for the merge's single output.
+>
+> Replace the entire line with an equivalent control merge, substituting the placeholder names with the same ones the merge had.
 > ```mlir
-> %32, %muxIndex = control_merge %trueResult_2, %falseResult_3 {bb = 3 : ui32, name = #handshake.name<"my_control_merge">} : none, i1
+> %<controlResult>, %muxIndex = control_merge %<controlOperand1>, %<controlOperand2> {bb = 3 : ui32, name = #handshake.name<"my_control_merge">} : none, i1
 > ```
 
 And done! We provide a little shell script that will only run the part of the synthesis flow that comes after this file is generated. It will regenerate the VHDL design from the MLIR file, simulate it, and prepare data for the visualizer.
